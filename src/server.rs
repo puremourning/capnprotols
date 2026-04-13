@@ -550,19 +550,35 @@ impl LanguageServer for Backend {
                 }
             }
             CursorContext::FieldOrdinal => {
-                // Suggest the next valid `@<n>` for the enclosing struct.
-                let Some(next) = ordinals::next_ordinal_at(&text, byte) else {
-                    return Ok(None);
-                };
-                return Ok(Some(CompletionResponse::Array(vec![CompletionItem {
-                    label: next.to_string(),
-                    kind: Some(CompletionItemKind::VALUE),
-                    detail: Some("next field ordinal".to_string()),
-                    // Sort to the very top of any list YCM may merge us with.
-                    sort_text: Some(format!("0000_{:08}", next)),
-                    preselect: Some(true),
-                    ..Default::default()
-                }])));
+                // If we're inside a struct's field list, suggest the next ordinal.
+                // Otherwise (top-level file id, or right after `struct Foo `, `enum Bar `,
+                // `annotation pii `, etc.) generate a fresh capnp ID via `capnp id`.
+                if let Some(next) = ordinals::next_ordinal_at(&text, byte) {
+                    return Ok(Some(CompletionResponse::Array(vec![CompletionItem {
+                        label: next.to_string(),
+                        kind: Some(CompletionItemKind::VALUE),
+                        detail: Some("next field ordinal".to_string()),
+                        sort_text: Some(format!("0000_{:08}", next)),
+                        preselect: Some(true),
+                        ..Default::default()
+                    }])));
+                }
+                // Top-level / declaration site: generate a unique capnp ID.
+                let config = self.config.read().await.clone();
+                if let Some(id) = generate_capnp_id(&config.compiler_path).await {
+                    // The user already typed the `@`, so insert just `0x...`.
+                    let bare = id.trim_start_matches('@').to_string();
+                    return Ok(Some(CompletionResponse::Array(vec![CompletionItem {
+                        label: id.clone(),
+                        kind: Some(CompletionItemKind::VALUE),
+                        detail: Some("freshly generated capnp ID".to_string()),
+                        insert_text: Some(bare),
+                        sort_text: Some("0000_id".to_string()),
+                        preselect: Some(true),
+                        ..Default::default()
+                    }])));
+                }
+                return Ok(None);
             }
             CursorContext::Unknown => index.completion_candidates().collect(),
             CursorContext::None => return Ok(None),
@@ -725,6 +741,24 @@ fn build_generic_signature(callee: &str, params: &[String]) -> SignatureInformat
         parameters: Some(out),
         active_parameter: None,
     }
+}
+
+/// Run `capnp id` and return the generated `@0x...` token, or None if the binary
+/// fails for any reason.
+async fn generate_capnp_id(compiler: &str) -> Option<String> {
+    let output = tokio::process::Command::new(compiler)
+        .arg("id")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&output.stdout).ok()?.trim();
+    s.starts_with("@0x").then(|| s.to_string())
 }
 
 /// Cap'n Proto's built-in primitive types, plus the parametric ones. Always offered in
