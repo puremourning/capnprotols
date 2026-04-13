@@ -106,6 +106,12 @@ let g:ycm_langauge_server += [
 ]
 ```
 
+### VS Code
+
+A minimal extension is included under [`extension/`](extension/) — a thin
+LSP client that launches the `capnprotols` binary. See its
+[README](extension/README.md) for build/install steps.
+
 ## Architecture notes
 
 - `compiler.rs` shells out to `capnp compile -o-` against an overlay file written
