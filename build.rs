@@ -21,17 +21,50 @@ fn locate_schema() -> PathBuf {
     if let Ok(p) = std::env::var("CAPNP_SCHEMA") {
         return PathBuf::from(p);
     }
-    // Default: sibling checkout of the C++ Cap'n Proto repo.
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest
-        .parent()
-        .expect("workspace parent")
-        .join("capnproto/c++/src/capnp/schema.capnp");
-    if candidate.exists() {
-        return candidate;
+    // Probe the same include roots `capnp` itself searches, plus the install prefix
+    // derived from the resolved binary location and a few common platform defaults.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(inc) = capnp_install_include() {
+        roots.push(inc);
+    }
+    roots.extend(
+        [
+            "/usr/local/include",
+            "/usr/include",
+            "/opt/homebrew/include",
+            "/opt/local/include",
+        ]
+        .iter()
+        .map(PathBuf::from),
+    );
+    // Last resort: a sibling checkout of the C++ repo (handy for hacking on capnproto
+    // itself before installing).
+    if let Some(parent) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+        roots.push(parent.join("capnproto/c++/src"));
+    }
+    for root in &roots {
+        let candidate = root.join("capnp/schema.capnp");
+        if candidate.exists() {
+            return candidate;
+        }
     }
     panic!(
-        "could not find schema.capnp; set CAPNP_SCHEMA env var. Tried: {}",
-        candidate.display()
+        "could not find capnp/schema.capnp in any standard include directory; \
+         set CAPNP_SCHEMA env var. Tried: {}",
+        roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
     );
+}
+
+fn capnp_install_include() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("capnp");
+        if candidate.is_file() {
+            let inc = dir.parent()?.join("include");
+            if inc.is_dir() {
+                return Some(inc);
+            }
+        }
+    }
+    None
 }

@@ -35,12 +35,14 @@ for editor-resilient highlighting.
 ## Requirements
 
 - Rust toolchain (build only): `cargo`, `rustc`.
-- The `capnp` binary on `$PATH` (any version with `compile -o-` support; tested
-  with 1.3.0 from Homebrew).
-- A checkout of the C++ Cap'n Proto repository at `../capnproto/` (sibling to
-  this directory), used at build time to regenerate the latest
-  `schema.capnp` Rust bindings. Override with `CAPNP_SCHEMA=/path/to/schema.capnp`
-  if it lives elsewhere.
+- A Cap'n Proto installation: the `capnp` binary on `$PATH` and its
+  `capnp/schema.capnp` available under one of the install's include directories
+  (Homebrew, MacPorts, apt and most manual installs put it there automatically).
+  Tested with 1.3.0.
+
+`build.rs` regenerates the Rust bindings from the installed `schema.capnp` so
+the server gets the latest `startByte`/`endByte` and `FileSourceInfo` accessors.
+Override the search with `CAPNP_SCHEMA=/path/to/schema.capnp` if needed.
 
 ## Build
 
@@ -48,9 +50,6 @@ for editor-resilient highlighting.
 cargo build --release
 # binary at target/release/capnprotols
 ```
-
-The build script (`build.rs`) regenerates `schema_capnp.rs` from the C++ schema
-so we get the latest `startByte`/`endByte` and `FileSourceInfo` accessors.
 
 ## Configuration
 
