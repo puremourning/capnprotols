@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::aliases;
 use crate::compiler;
@@ -97,6 +97,7 @@ impl Backend {
             return;
         };
         let config = self.config.read().await.clone();
+        debug!("refresh: compiling {}", path.display());
         let result = compiler::compile_file(&config, &path, Some(&text)).await;
         // Strategy: always update diagnostics, but only replace the cached symbol index
         // when we got a usable CGR. On compile failure we keep the previous index so
@@ -107,15 +108,29 @@ impl Backend {
         let mut new_index: Option<Arc<Index>> = None;
         match result {
             Ok(out) => {
+                // capnp prints paths relative to its cwd, so an absolute overlay path may
+                // come back as `/abs/path/.capnprotols.foo.capnp`, `path/.capnprotols.foo.capnp`,
+                // or just `.capnprotols.foo.capnp`. Rewriting the overlay *basename* back to
+                // the real basename normalises all three at once. The diagnostics matcher
+                // then compares by file_name as a fallback so the path prefix doesn't matter.
                 let mut stderr = out.stderr.clone();
-                if let Some(ov) = out.overlay_path.as_deref() {
-                    stderr = stderr.replace(&ov.to_string_lossy().to_string(), &path.to_string_lossy());
-                    let ov_lossy = ov.to_string_lossy();
-                    if let Some(noslash) = ov_lossy.strip_prefix('/') {
-                        stderr = stderr.replace(noslash, &path.to_string_lossy().trim_start_matches('/'));
-                    }
+                if let (Some(ov), Some(real)) = (
+                    out.overlay_path.as_deref().and_then(|p| p.file_name()),
+                    path.file_name(),
+                ) {
+                    stderr = stderr.replace(&*ov.to_string_lossy(), &real.to_string_lossy());
                 }
                 diags = diagnostics::parse_stderr(&stderr, &path);
+                debug!(
+                    "refresh: stderr={} bytes, parsed {} diagnostic(s), success={}",
+                    stderr.len(),
+                    diags.len(),
+                    out.success,
+                );
+                if !stderr.is_empty() && diags.is_empty() {
+                    let preview: String = stderr.lines().take(3).collect::<Vec<_>>().join(" | ");
+                    warn!("refresh: stderr was non-empty but no diagnostics parsed; first lines: {preview}");
+                }
                 if !out.cgr.is_empty() {
                     match Index::from_cgr_bytes(&out.cgr) {
                         Ok(mut i) => {
@@ -159,7 +174,14 @@ impl LanguageServer for Backend {
                 Err(e) => warn!("invalid initializationOptions: {e}"),
             }
         }
-        info!("capnprotols initialized");
+        let cfg = self.config.read().await;
+        info!(
+            "capnprotols {} initialized: compiler={}, import_paths={:?}, resolution_roots={:?}",
+            env!("CARGO_PKG_VERSION"),
+            cfg.compiler_path,
+            cfg.import_paths,
+            cfg.resolution_roots,
+        );
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "capnprotols".to_string(),

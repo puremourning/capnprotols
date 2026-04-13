@@ -66,6 +66,29 @@ fn diagnostics_published_on_open() {
 }
 
 #[test]
+fn diagnostics_have_ranges_and_messages() {
+    let mut c = LspClient::start();
+    let proj = TempProject::with_fixtures(&[]);
+    let path = proj.path("bad.capnp");
+    let text = "@0xeaf06436acd04fc9;\nstruct Foo { foo @0 :NoSuchType; }\n";
+    std::fs::write(&path, text).unwrap();
+    let uri = format!("file://{}", path.display());
+
+    let diags = c.open(&uri, text);
+    assert!(!diags.is_empty(), "expected diagnostics");
+    let d = &diags[0];
+    assert_eq!(d["source"], "capnp");
+    let msg = d["message"].as_str().unwrap();
+    assert!(msg.contains("NoSuchType"), "msg: {msg}");
+    let range = &d["range"];
+    assert_eq!(range["start"]["line"], 1, "should land on line 2 (0-indexed 1)");
+    let start_char = range["start"]["character"].as_u64().unwrap();
+    let end_char = range["end"]["character"].as_u64().unwrap();
+    assert!(end_char > start_char, "expected non-empty range, got {start_char}..{end_char}");
+    c.shutdown();
+}
+
+#[test]
 fn diagnostics_report_syntax_errors() {
     let mut c = LspClient::start();
     let proj = user_project();
