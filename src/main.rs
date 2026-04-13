@@ -6,6 +6,7 @@ mod config;
 mod diagnostics;
 mod document;
 mod index;
+mod ordinals;
 mod schema_capnp;
 mod semantic_tokens;
 mod server;

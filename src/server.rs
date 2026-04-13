@@ -15,6 +15,7 @@ use crate::config::{Config, InitOptions};
 use crate::diagnostics;
 use crate::document::DocumentStore;
 use crate::index::{Index, NodeInfo, NodeKind};
+use crate::ordinals;
 use crate::semantic_tokens;
 
 pub struct Backend {
@@ -181,7 +182,12 @@ impl LanguageServer for Backend {
                     ),
                 ),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![":".to_string(), ".".to_string()]),
+                    trigger_characters: Some(vec![
+                        ":".to_string(),
+                        ".".to_string(),
+                        "$".to_string(),
+                        "@".to_string(),
+                    ]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -453,6 +459,21 @@ impl LanguageServer for Backend {
                     Vec::new()
                 }
             }
+            CursorContext::FieldOrdinal => {
+                // Suggest the next valid `@<n>` for the enclosing struct.
+                let Some(next) = ordinals::next_ordinal_at(&text, byte) else {
+                    return Ok(None);
+                };
+                return Ok(Some(CompletionResponse::Array(vec![CompletionItem {
+                    label: next.to_string(),
+                    kind: Some(CompletionItemKind::VALUE),
+                    detail: Some("next field ordinal".to_string()),
+                    // Sort to the very top of any list YCM may merge us with.
+                    sort_text: Some(format!("0000_{:08}", next)),
+                    preselect: Some(true),
+                    ..Default::default()
+                }])));
+            }
             CursorContext::Unknown => index.completion_candidates().collect(),
             CursorContext::None => return Ok(None),
         };
@@ -519,6 +540,9 @@ enum CursorContext<'a> {
     Annotation,
     /// After `Namespace.` — a member of an imported file.
     Member { namespace: &'a str },
+    /// After `@` (optionally followed by digits being typed) — suggest the next field
+    /// ordinal in the enclosing struct's ID space.
+    FieldOrdinal,
     /// We can't tell — return everything (preserve old behaviour).
     Unknown,
     /// Definitely not a completion site (inside a comment or string).
@@ -547,6 +571,17 @@ fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
     }
     if quotes % 2 == 1 {
         return CursorContext::None;
+    }
+    // Field-ordinal completion: cursor is right after `@` (no digits yet) or in the
+    // middle of typing the digits after `@`.
+    {
+        let mut k = cursor;
+        while k > 0 && bytes[k - 1].is_ascii_digit() {
+            k -= 1;
+        }
+        if k > 0 && bytes[k - 1] == b'@' {
+            return CursorContext::FieldOrdinal;
+        }
     }
     // Skip the identifier currently being typed.
     let mut i = cursor;
