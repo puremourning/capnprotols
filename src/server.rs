@@ -413,6 +413,15 @@ impl LanguageServer for Backend {
         let byte = position_to_byte(&rope, pos) as usize;
         let ctx = completion_context(&text, byte);
 
+        // Built-in types and top-level keywords are always available regardless of whether
+        // the file currently parses, so emit them up-front for the relevant slots.
+        let mut prelude: Vec<CompletionItem> = Vec::new();
+        match &ctx {
+            CursorContext::Type => prelude.extend(builtin_type_items()),
+            CursorContext::Unknown => prelude.extend(top_level_keyword_items()),
+            _ => {}
+        }
+
         // Collect the relevant subset of candidates given the cursor's slot.
         let candidates: Vec<&NodeInfo> = match &ctx {
             CursorContext::Type => index.type_candidates().collect(),
@@ -478,27 +487,25 @@ impl LanguageServer for Backend {
             CursorContext::None => return Ok(None),
         };
 
-        let items: Vec<CompletionItem> = candidates
-            .into_iter()
-            .map(|n| CompletionItem {
-                label: n.short_name.clone(),
-                kind: Some(match n.kind {
-                    NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
-                    NodeKind::Enum => CompletionItemKind::ENUM,
-                    NodeKind::Annotation => CompletionItemKind::INTERFACE,
-                    NodeKind::Const => CompletionItemKind::CONSTANT,
-                    _ => CompletionItemKind::TEXT,
-                }),
-                detail: Some(n.display_name.clone()),
-                documentation: n.doc_comment.as_ref().map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d.clone(),
-                    })
-                }),
-                ..Default::default()
-            })
-            .collect();
+        let mut items: Vec<CompletionItem> = prelude;
+        items.extend(candidates.into_iter().map(|n| CompletionItem {
+            label: n.short_name.clone(),
+            kind: Some(match n.kind {
+                NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
+                NodeKind::Enum => CompletionItemKind::ENUM,
+                NodeKind::Annotation => CompletionItemKind::INTERFACE,
+                NodeKind::Const => CompletionItemKind::CONSTANT,
+                _ => CompletionItemKind::TEXT,
+            }),
+            detail: Some(n.display_name.clone()),
+            documentation: n.doc_comment.as_ref().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d.clone(),
+                })
+            }),
+            ..Default::default()
+        }));
         Ok(Some(CompletionResponse::Array(items)))
     }
 }
@@ -528,6 +535,40 @@ fn resolve_target_file(reported: &Path, requesting: &Path, roots: &[PathBuf]) ->
         }
     }
     reported.to_path_buf()
+}
+
+/// Cap'n Proto's built-in primitive types, plus the parametric ones. Always offered in
+/// type-slot completion so they're available even on a buffer that doesn't currently
+/// parse (a CGR-empty index can't supply them).
+const BUILTIN_TYPES: &[&str] = &[
+    "Void", "Bool", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+    "Float32", "Float64", "Text", "Data", "List", "AnyPointer", "AnyStruct", "Capability",
+];
+
+fn builtin_type_items() -> impl IntoIterator<Item = CompletionItem> {
+    BUILTIN_TYPES.iter().map(|name| CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some("built-in type".to_string()),
+        sort_text: Some(format!("0_{name}")), // float to top
+        ..Default::default()
+    })
+}
+
+/// Top-level / declaration-introducing keywords. Offered when we don't otherwise know
+/// what the cursor expects.
+const TOP_LEVEL_KEYWORDS: &[&str] = &[
+    "struct", "enum", "interface", "union", "group", "using", "import", "const", "annotation",
+    "extends",
+];
+
+fn top_level_keyword_items() -> impl IntoIterator<Item = CompletionItem> {
+    TOP_LEVEL_KEYWORDS.iter().map(|kw| CompletionItem {
+        label: kw.to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        sort_text: Some(format!("0_{kw}")),
+        ..Default::default()
+    })
 }
 
 /// What kind of identifier the cursor is positioned to receive. Used to filter
