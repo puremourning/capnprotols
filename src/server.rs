@@ -14,7 +14,7 @@ use crate::compiler;
 use crate::config::{Config, InitOptions};
 use crate::diagnostics;
 use crate::document::DocumentStore;
-use crate::index::{Index, NodeKind};
+use crate::index::{Index, NodeInfo, NodeKind};
 use crate::semantic_tokens;
 
 pub struct Backend {
@@ -398,10 +398,67 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> RpcResult<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.clone();
+        let pos = params.text_document_position.position;
+        let Some(text) = self.docs.get_text(&uri) else { return Ok(None) };
+        let Ok(path) = uri.to_file_path() else { return Ok(None) };
         let Some(index) = self.indices.get(&uri).map(|e| e.clone()) else { return Ok(None) };
 
-        let items: Vec<CompletionItem> = index
-            .completion_candidates()
+        let rope = Rope::from_str(&text);
+        let byte = position_to_byte(&rope, pos) as usize;
+        let ctx = completion_context(&text, byte);
+
+        // Collect the relevant subset of candidates given the cursor's slot.
+        let candidates: Vec<&NodeInfo> = match &ctx {
+            CursorContext::Type => index.type_candidates().collect(),
+            CursorContext::Annotation => index.annotation_candidates().collect(),
+            CursorContext::Member { namespace } => {
+                if let Some(import_path) = aliases::import_path_for(&text, namespace) {
+                    let config = self.config.read().await.clone();
+                    let reported = std::path::PathBuf::from(import_path.trim_start_matches('/'));
+                    let target = resolve_target_file(&reported, &path, &config.resolution_roots);
+                    let from_index = index.candidates_in_file(&target);
+                    if !from_index.is_empty() {
+                        from_index
+                    } else if let Ok(target_text) = std::fs::read_to_string(&target) {
+                        // Imported file isn't in our CGR (nothing from it survived).
+                        // Fall back to a surface-text scan of its top-level declarations.
+                        return Ok(Some(CompletionResponse::Array(
+                            aliases::scan_top_level(&target_text)
+                                .into_iter()
+                                .map(|d| CompletionItem {
+                                    label: d.name,
+                                    kind: Some(match d.kind {
+                                        aliases::DeclKind::Struct
+                                        | aliases::DeclKind::Interface => CompletionItemKind::STRUCT,
+                                        aliases::DeclKind::Enum => CompletionItemKind::ENUM,
+                                        aliases::DeclKind::Annotation => CompletionItemKind::INTERFACE,
+                                        aliases::DeclKind::Const => CompletionItemKind::CONSTANT,
+                                        aliases::DeclKind::Using => CompletionItemKind::TYPE_PARAMETER,
+                                    }),
+                                    detail: Some(format!("from {}", target.display())),
+                                    documentation: d.doc_comment.map(|d| {
+                                        Documentation::MarkupContent(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: d,
+                                        })
+                                    }),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                        )));
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            CursorContext::Unknown => index.completion_candidates().collect(),
+            CursorContext::None => return Ok(None),
+        };
+
+        let items: Vec<CompletionItem> = candidates
+            .into_iter()
             .map(|n| CompletionItem {
                 label: n.short_name.clone(),
                 kind: Some(match n.kind {
@@ -412,6 +469,12 @@ impl LanguageServer for Backend {
                     _ => CompletionItemKind::TEXT,
                 }),
                 detail: Some(n.display_name.clone()),
+                documentation: n.doc_comment.as_ref().map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
                 ..Default::default()
             })
             .collect();
@@ -444,6 +507,84 @@ fn resolve_target_file(reported: &Path, requesting: &Path, roots: &[PathBuf]) ->
         }
     }
     reported.to_path_buf()
+}
+
+/// What kind of identifier the cursor is positioned to receive. Used to filter
+/// completion candidates to the relevant subset.
+#[derive(Debug)]
+enum CursorContext<'a> {
+    /// After `:` or `(` or `,` — a type slot (struct/enum/interface/const).
+    Type,
+    /// After `$` — an annotation slot.
+    Annotation,
+    /// After `Namespace.` — a member of an imported file.
+    Member { namespace: &'a str },
+    /// We can't tell — return everything (preserve old behaviour).
+    Unknown,
+    /// Definitely not a completion site (inside a comment or string).
+    None,
+}
+
+fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
+    let bytes = text.as_bytes();
+    if cursor > bytes.len() {
+        return CursorContext::None;
+    }
+    // Bail out if cursor sits inside a comment or a string literal on the current line.
+    let line_start = bytes[..cursor]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let line_so_far = &text[line_start..cursor];
+    if line_so_far.contains('#') {
+        return CursorContext::None;
+    }
+    let mut quotes = 0;
+    for &b in line_so_far.as_bytes() {
+        if b == b'"' {
+            quotes += 1;
+        }
+    }
+    if quotes % 2 == 1 {
+        return CursorContext::None;
+    }
+    // Skip the identifier currently being typed.
+    let mut i = cursor;
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    let word_start = i;
+    // Skip preceding whitespace (within the same logical line — but capnp continues
+    // type expressions across newlines, so allow newlines too).
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return CursorContext::Unknown;
+    }
+    let _ = word_start;
+    match bytes[i - 1] {
+        b':' => CursorContext::Type,
+        b'$' => CursorContext::Annotation,
+        b'(' | b',' => CursorContext::Type,
+        b'.' => {
+            let dot = i - 1;
+            let mut ns_start = dot;
+            while ns_start > 0
+                && (bytes[ns_start - 1].is_ascii_alphanumeric() || bytes[ns_start - 1] == b'_')
+            {
+                ns_start -= 1;
+            }
+            if ns_start < dot {
+                CursorContext::Member {
+                    namespace: &text[ns_start..dot],
+                }
+            } else {
+                CursorContext::Unknown
+            }
+        }
+        _ => CursorContext::Unknown,
+    }
 }
 
 /// If `byte` falls inside a `"..."` string that's the operand of an `import` keyword,

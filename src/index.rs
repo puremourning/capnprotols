@@ -285,6 +285,37 @@ impl Index {
                 )
         })
     }
+
+    /// Candidates that look like types: structs, enums, interfaces, plus consts (since
+    /// you can refer to constants in default values). Excludes annotations.
+    pub fn type_candidates(&self) -> impl Iterator<Item = &NodeInfo> {
+        self.nodes.values().filter(|n| {
+            !n.short_name.is_empty()
+                && matches!(
+                    n.kind,
+                    NodeKind::Struct | NodeKind::Enum | NodeKind::Interface | NodeKind::Const
+                )
+        })
+    }
+
+    /// Candidates that look like annotations.
+    pub fn annotation_candidates(&self) -> impl Iterator<Item = &NodeInfo> {
+        self.nodes
+            .values()
+            .filter(|n| !n.short_name.is_empty() && matches!(n.kind, NodeKind::Annotation))
+    }
+
+    /// Candidates declared inside a particular file (for `Namespace.<cursor>` completion).
+    pub fn candidates_in_file(&self, file: &Path) -> Vec<&NodeInfo> {
+        self.nodes
+            .values()
+            .filter(|n| {
+                !n.short_name.is_empty()
+                    && paths_match(&n.file, file)
+                    && !matches!(n.kind, NodeKind::File | NodeKind::Other)
+            })
+            .collect()
+    }
 }
 
 /// True if two paths refer to the same on-disk location, accounting for capnp's habit of

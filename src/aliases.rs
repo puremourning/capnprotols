@@ -22,7 +22,7 @@ fn re() -> &'static Regex {
 
 /// Strip line comments (`# ...`) so we don't match `using` inside a comment. Cheap pass —
 /// we replace comment chars with spaces to preserve byte offsets.
-fn strip_comments(src: &str) -> String {
+pub(crate) fn strip_comments(src: &str) -> String {
     let mut out = src.as_bytes().to_vec();
     let mut i = 0;
     while i < out.len() {
@@ -57,6 +57,95 @@ pub fn scan(src: &str) -> Vec<UsingAlias> {
 /// Find an alias with the exact given name, if any.
 pub fn find<'a>(aliases: &'a [UsingAlias], name: &str) -> Option<&'a UsingAlias> {
     aliases.iter().find(|a| a.name == name)
+}
+
+/// A top-level declaration found by surface-text scanning (used when we don't have a
+/// real index for a file, e.g. completing `OtherFile.<cursor>` for a file we haven't
+/// compiled).
+#[derive(Debug, Clone)]
+pub struct TopLevelDecl {
+    pub kind: DeclKind,
+    pub name: String,
+    pub doc_comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclKind {
+    Struct,
+    Enum,
+    Interface,
+    Annotation,
+    Const,
+    Using,
+}
+
+/// Scan a file's source for top-level declarations of named items. This is a regex pass
+/// over comment-stripped text — it doesn't try to track nesting, so nested types are
+/// missed. Doc comments are gathered from contiguous `# ...` lines immediately preceding
+/// each declaration.
+pub fn scan_top_level(src: &str) -> Vec<TopLevelDecl> {
+    use std::sync::OnceLock;
+    static R: OnceLock<Regex> = OnceLock::new();
+    let re = R.get_or_init(|| {
+        Regex::new(r"^\s*(struct|enum|interface|annotation|const|using)\s+([A-Za-z_][A-Za-z0-9_]*)")
+            .unwrap()
+    });
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(c) = re.captures(line) else { continue };
+        let kind = match &c[1] {
+            "struct" => DeclKind::Struct,
+            "enum" => DeclKind::Enum,
+            "interface" => DeclKind::Interface,
+            "annotation" => DeclKind::Annotation,
+            "const" => DeclKind::Const,
+            "using" => DeclKind::Using,
+            _ => continue,
+        };
+        let name = c[2].to_string();
+        // Walk back collecting contiguous comment lines.
+        let mut doc_lines: Vec<&str> = Vec::new();
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            let prev = lines[j].trim_start();
+            if let Some(rest) = prev.strip_prefix('#') {
+                doc_lines.push(rest.trim_start_matches(' '));
+            } else if prev.is_empty() {
+                break;
+            } else {
+                break;
+            }
+        }
+        doc_lines.reverse();
+        let doc = (!doc_lines.is_empty()).then(|| doc_lines.join("\n"));
+        out.push(TopLevelDecl {
+            kind,
+            name,
+            doc_comment: doc,
+        });
+    }
+    out
+}
+
+/// `using NAME = import "PATH";` — return PATH for a given NAME, if any.
+pub fn import_path_for(src: &str, name: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static R: OnceLock<Regex> = OnceLock::new();
+    let re = R.get_or_init(|| {
+        Regex::new(
+            r#"\busing\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*import\s+"([^"]+)"\s*;"#,
+        )
+        .unwrap()
+    });
+    let cleaned = strip_comments(src);
+    for c in re.captures_iter(&cleaned) {
+        if &c[1] == name {
+            return Some(c[2].to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
