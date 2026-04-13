@@ -171,6 +171,11 @@ impl LanguageServer for Backend {
                 )),
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
+                    work_done_progress_options: Default::default(),
+                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -333,6 +338,79 @@ impl LanguageServer for Backend {
             uri: target_uri,
             range: Range { start, end },
         })))
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> RpcResult<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri.clone();
+        let pos = params.text_document_position_params.position;
+        let Some(text) = self.docs.get_text(&uri) else { return Ok(None) };
+        let Some(index) = self.indices.get(&uri).map(|e| e.clone()) else { return Ok(None) };
+
+        let rope = Rope::from_str(&text);
+        let byte = position_to_byte(&rope, pos) as usize;
+
+        // Find the unmatched `(` to the left of the cursor on the same logical expression
+        // and the identifier (or dotted path) immediately preceding it.
+        let Some(call) = enclosing_call(&text, byte) else { return Ok(None) };
+
+        // Resolve the callee. Two cases:
+        //   1. Builtin generic: `List` (one type param)
+        //   2. Index lookup by leaf name: annotation -> use its value-struct's fields;
+        //      struct/interface -> use its generic parameters.
+        let signature = if call.callee == "List" {
+            Some(SignatureInformation {
+                label: "List(T)".into(),
+                documentation: Some(Documentation::String(
+                    "List of T. Element type follows.".into(),
+                )),
+                parameters: Some(vec![ParameterInformation {
+                    label: ParameterLabel::Simple("T".into()),
+                    documentation: None,
+                }]),
+                active_parameter: Some(0),
+            })
+        } else {
+            let leaf = call.callee.rsplit('.').next().unwrap_or(&call.callee);
+            let path = uri.to_file_path().ok();
+            let node = path
+                .as_ref()
+                .and_then(|p| index.find_node_by_short_name(leaf, p))
+                .or_else(|| {
+                    index.nodes.values().find(|n| {
+                        let leaf_name = n.short_name.rsplit('.').next().unwrap_or(&n.short_name);
+                        leaf_name == leaf
+                    })
+                });
+            let Some(node) = node else { return Ok(None) };
+            match node.kind {
+                NodeKind::Annotation => match node
+                    .annotation_value_type
+                    .and_then(|id| index.node(id))
+                {
+                    Some(value_node) if !value_node.fields.is_empty() => Some(
+                        build_field_signature(&format!("${}", call.callee), &value_node.fields),
+                    ),
+                    _ => None,
+                },
+                NodeKind::Struct | NodeKind::Interface if !node.parameters.is_empty() => {
+                    Some(build_generic_signature(&call.callee, &node.parameters))
+                }
+                _ => None,
+            }
+        };
+
+        let Some(mut signature) = signature else { return Ok(None) };
+        let n = signature.parameters.as_ref().map_or(0, |p| p.len()) as u32;
+        let active = call.active_parameter.min(n.saturating_sub(1));
+        signature.active_parameter = Some(active);
+        Ok(Some(SignatureHelp {
+            signatures: vec![signature],
+            active_signature: Some(0),
+            active_parameter: Some(active),
+        }))
     }
 
     async fn semantic_tokens_full(
@@ -538,6 +616,115 @@ fn resolve_target_file(reported: &Path, requesting: &Path, roots: &[PathBuf]) ->
         }
     }
     reported.to_path_buf()
+}
+
+/// A call (annotation application or generic instantiation) found by walking back from
+/// the cursor. `callee` is the dotted name (e.g. `Json.discriminator`, `List`, or `Map`),
+/// `active_parameter` is the comma index of the cursor inside the parens.
+struct EnclosingCall {
+    callee: String,
+    active_parameter: u32,
+}
+
+fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
+    let bytes = text.as_bytes();
+    if cursor > bytes.len() {
+        return None;
+    }
+    // Walk back tracking paren depth; stop at the unmatched `(` that contains us.
+    let mut depth: i32 = 0;
+    let mut commas: u32 = 0;
+    let mut i = cursor;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' => {
+                depth -= 1;
+                if depth < 0 && bytes[i] == b'(' {
+                    // Found our unmatched `(` at byte i. Identify the callee just before.
+                    let mut j = i;
+                    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+                        j -= 1;
+                    }
+                    let mut k = j;
+                    while k > 0
+                        && (bytes[k - 1].is_ascii_alphanumeric()
+                            || bytes[k - 1] == b'_'
+                            || bytes[k - 1] == b'.')
+                    {
+                        k -= 1;
+                    }
+                    if k == j {
+                        return None;
+                    }
+                    let callee = std::str::from_utf8(&bytes[k..j]).ok()?.to_string();
+                    return Some(EnclosingCall {
+                        callee,
+                        active_parameter: commas,
+                    });
+                }
+                if depth < 0 {
+                    return None; // unmatched `[` or `{` — not an annotation/call
+                }
+            }
+            b',' if depth == 0 => commas += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn build_field_signature(label_prefix: &str, fields: &[crate::index::FieldInfo]) -> SignatureInformation {
+    let mut label = String::from(label_prefix);
+    label.push('(');
+    let mut params: Vec<ParameterInformation> = Vec::with_capacity(fields.len());
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            label.push_str(", ");
+        }
+        let start = label.len() as u32;
+        label.push_str(&f.name);
+        label.push_str(" = ");
+        label.push_str(&f.type_str);
+        let end = label.len() as u32;
+        params.push(ParameterInformation {
+            label: ParameterLabel::LabelOffsets([start, end]),
+            documentation: None,
+        });
+    }
+    label.push(')');
+    SignatureInformation {
+        label,
+        documentation: None,
+        parameters: Some(params),
+        active_parameter: None,
+    }
+}
+
+fn build_generic_signature(callee: &str, params: &[String]) -> SignatureInformation {
+    let mut label = String::from(callee);
+    label.push('(');
+    let mut out: Vec<ParameterInformation> = Vec::with_capacity(params.len());
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            label.push_str(", ");
+        }
+        let start = label.len() as u32;
+        label.push_str(p);
+        let end = label.len() as u32;
+        out.push(ParameterInformation {
+            label: ParameterLabel::LabelOffsets([start, end]),
+            documentation: None,
+        });
+    }
+    label.push(')');
+    SignatureInformation {
+        label,
+        documentation: None,
+        parameters: Some(out),
+        active_parameter: None,
+    }
 }
 
 /// Cap'n Proto's built-in primitive types, plus the parametric ones. Always offered in

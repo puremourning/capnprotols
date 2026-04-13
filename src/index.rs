@@ -33,6 +33,23 @@ pub struct NodeInfo {
     pub end_byte: u32,
     pub scope_id: u64,
     pub doc_comment: Option<String>,
+    /// For generic structs/interfaces (e.g. `struct Foo(T, U)`), the parameter names.
+    /// Empty for non-generic types.
+    pub parameters: Vec<String>,
+    /// For struct nodes, the immediate (non-group) named fields with their rendered types.
+    /// Empty for non-structs.
+    pub fields: Vec<FieldInfo>,
+    /// For annotation nodes, the typeId of the value type (typically a struct whose fields
+    /// are the named arguments at the application site).
+    pub annotation_value_type: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldInfo {
+    pub name: String,
+    /// Rendered type string, e.g. `:Text`, `:UInt32`, `:List(Foo)`. Empty for groups
+    /// (which we don't render).
+    pub type_str: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +106,16 @@ impl Index {
             }
         }
 
+        // First pass: collect basic metadata for every node so we can render type
+        // references that point at other nodes (e.g. a struct field of type `:OtherType`).
+        let mut display_name_by_id: HashMap<u64, String> = HashMap::new();
+        for node in cgr.get_nodes()?.iter() {
+            let dn = node.get_display_name()?.to_string()?;
+            let prefix_len = node.get_display_name_prefix_length() as usize;
+            let short = dn.get(prefix_len..).unwrap_or("").to_string();
+            display_name_by_id.insert(node.get_id(), if short.is_empty() { dn } else { short });
+        }
+
         // Nodes
         for node in cgr.get_nodes()?.iter() {
             let id = node.get_id();
@@ -99,13 +126,39 @@ impl Index {
                 .unwrap_or("")
                 .to_string();
             let file = file_of_display_name(&display_name);
+            let mut parameters: Vec<String> = Vec::new();
+            if node.has_parameters() {
+                for p in node.get_parameters()?.iter() {
+                    parameters.push(p.get_name()?.to_string()?);
+                }
+            }
+            let mut fields: Vec<FieldInfo> = Vec::new();
+            let mut annotation_value_type: Option<u64> = None;
+            use schema_capnp::node::Which as NodeWhich;
             let kind = match node.which() {
-                Ok(schema_capnp::node::File(_)) => NodeKind::File,
-                Ok(schema_capnp::node::Struct(_)) => NodeKind::Struct,
-                Ok(schema_capnp::node::Enum(_)) => NodeKind::Enum,
-                Ok(schema_capnp::node::Interface(_)) => NodeKind::Interface,
-                Ok(schema_capnp::node::Const(_)) => NodeKind::Const,
-                Ok(schema_capnp::node::Annotation(_)) => NodeKind::Annotation,
+                Ok(NodeWhich::File(())) => NodeKind::File,
+                Ok(NodeWhich::Struct(s)) => {
+                    for f in s.get_fields()?.iter() {
+                        let name = f.get_name()?.to_string()?;
+                        let type_str = match f.which() {
+                            Ok(schema_capnp::field::Slot(slot)) => {
+                                let ty = slot.get_type()?;
+                                format!(":{}", render_type(&ty, &display_name_by_id))
+                            }
+                            _ => String::new(),
+                        };
+                        fields.push(FieldInfo { name, type_str });
+                    }
+                    NodeKind::Struct
+                }
+                Ok(NodeWhich::Enum(_)) => NodeKind::Enum,
+                Ok(NodeWhich::Interface(_)) => NodeKind::Interface,
+                Ok(NodeWhich::Const(_)) => NodeKind::Const,
+                Ok(NodeWhich::Annotation(a)) => {
+                    let ty = a.get_type()?;
+                    annotation_value_type = type_target_id(&ty);
+                    NodeKind::Annotation
+                }
                 _ => NodeKind::Other,
             };
             let mut start_byte = node.get_start_byte();
@@ -128,6 +181,9 @@ impl Index {
                     end_byte,
                     scope_id: node.get_scope_id(),
                     doc_comment: doc_comments.remove(&id),
+                    parameters,
+                    fields,
+                    annotation_value_type,
                 },
             );
         }
@@ -315,6 +371,56 @@ impl Index {
                     && !matches!(n.kind, NodeKind::File | NodeKind::Other)
             })
             .collect()
+    }
+}
+
+/// Render a `Type` reader (from CGR) as a human-readable string. Falls back to typeId
+/// numbers when the referenced node isn't known.
+fn render_type(
+    ty: &schema_capnp::type_::Reader,
+    names: &HashMap<u64, String>,
+) -> String {
+    use schema_capnp::type_::Which::*;
+    match ty.which() {
+        Ok(Void(())) => "Void".into(),
+        Ok(Bool(())) => "Bool".into(),
+        Ok(Int8(())) => "Int8".into(),
+        Ok(Int16(())) => "Int16".into(),
+        Ok(Int32(())) => "Int32".into(),
+        Ok(Int64(())) => "Int64".into(),
+        Ok(Uint8(())) => "UInt8".into(),
+        Ok(Uint16(())) => "UInt16".into(),
+        Ok(Uint32(())) => "UInt32".into(),
+        Ok(Uint64(())) => "UInt64".into(),
+        Ok(Float32(())) => "Float32".into(),
+        Ok(Float64(())) => "Float64".into(),
+        Ok(Text(())) => "Text".into(),
+        Ok(Data(())) => "Data".into(),
+        Ok(List(l)) => match l.get_element_type() {
+            Ok(inner) => format!("List({})", render_type(&inner, names)),
+            Err(_) => "List(?)".into(),
+        },
+        Ok(Enum(e)) => name_or_id(names, e.get_type_id()),
+        Ok(Struct(s)) => name_or_id(names, s.get_type_id()),
+        Ok(Interface(i)) => name_or_id(names, i.get_type_id()),
+        Ok(AnyPointer(_)) => "AnyPointer".into(),
+        Err(_) => "?".into(),
+    }
+}
+
+fn name_or_id(names: &HashMap<u64, String>, id: u64) -> String {
+    names.get(&id).cloned().unwrap_or_else(|| format!("@0x{id:016x}"))
+}
+
+/// For type references that point at a single named node (struct/enum/interface), return
+/// that node's typeId. Used for annotation value types.
+fn type_target_id(ty: &schema_capnp::type_::Reader) -> Option<u64> {
+    use schema_capnp::type_::Which::*;
+    match ty.which() {
+        Ok(Struct(s)) => Some(s.get_type_id()),
+        Ok(Enum(e)) => Some(e.get_type_id()),
+        Ok(Interface(i)) => Some(i.get_type_id()),
+        _ => None,
     }
 }
 
