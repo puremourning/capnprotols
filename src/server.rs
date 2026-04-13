@@ -98,49 +98,52 @@ impl Backend {
         };
         let config = self.config.read().await.clone();
         let result = compiler::compile_file(&config, &path, Some(&text)).await;
-        let (diags, index) = match result {
+        // Strategy: always update diagnostics, but only replace the cached symbol index
+        // when we got a usable CGR. On compile failure we keep the previous index so
+        // completion/goto/hover stay useful while the user has a syntax error mid-edit
+        // (byte offsets may be stale but "right enough" for everything except very
+        // large edits).
+        let diags;
+        let mut new_index: Option<Arc<Index>> = None;
+        match result {
             Ok(out) => {
-                // Diagnostics: normalise references to the overlay file back to `path`,
-                // then drop diagnostics for any other file.
                 let mut stderr = out.stderr.clone();
                 if let Some(ov) = out.overlay_path.as_deref() {
                     stderr = stderr.replace(&ov.to_string_lossy().to_string(), &path.to_string_lossy());
-                    // capnp also drops the leading `/` in messages.
                     let ov_lossy = ov.to_string_lossy();
                     if let Some(noslash) = ov_lossy.strip_prefix('/') {
                         stderr = stderr.replace(noslash, &path.to_string_lossy().trim_start_matches('/'));
                     }
                 }
-                let diags = diagnostics::parse_stderr(&stderr, &path);
-                let index = match Index::from_cgr_bytes(&out.cgr) {
-                    Ok(mut i) => {
-                        if let Some(ov) = out.overlay_path.as_deref() {
-                            i.remap_file(ov, &path);
+                diags = diagnostics::parse_stderr(&stderr, &path);
+                if !out.cgr.is_empty() {
+                    match Index::from_cgr_bytes(&out.cgr) {
+                        Ok(mut i) => {
+                            if let Some(ov) = out.overlay_path.as_deref() {
+                                i.remap_file(ov, &path);
+                            }
+                            new_index = Some(Arc::new(i));
                         }
-                        Arc::new(i)
+                        Err(e) => warn!("CGR decode failed (keeping cached index): {e:#}"),
                     }
-                    Err(e) => {
-                        warn!("CGR decode failed: {e:#}");
-                        Arc::new(Index::default())
-                    }
-                };
-                (diags, index)
+                }
             }
             Err(err) => {
                 warn!("compile failed: {err:#}");
-                (
-                    vec![Diagnostic {
-                        range: Range::default(),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        source: Some("capnprotols".to_string()),
-                        message: format!("failed to invoke capnp: {err}"),
-                        ..Default::default()
-                    }],
-                    Arc::new(Index::default()),
-                )
+                diags = vec![Diagnostic {
+                    range: Range::default(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("capnprotols".to_string()),
+                    message: format!("failed to invoke capnp: {err}"),
+                    ..Default::default()
+                }];
             }
-        };
-        self.indices.insert(uri.clone(), index);
+        }
+        if let Some(idx) = new_index {
+            self.indices.insert(uri.clone(), idx);
+        }
+        // No previous index either? Drop in an empty one so downstream reads don't fail.
+        self.indices.entry(uri.clone()).or_insert_with(|| Arc::new(Index::default()));
         self.client.publish_diagnostics(uri, diags, None).await;
     }
 }
