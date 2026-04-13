@@ -15,6 +15,7 @@ use crate::config::{Config, InitOptions};
 use crate::diagnostics;
 use crate::document::DocumentStore;
 use crate::index::{Index, NodeKind};
+use crate::semantic_tokens;
 
 pub struct Backend {
     client: Client,
@@ -166,6 +167,19 @@ impl LanguageServer for Backend {
                 )),
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
+                                token_modifiers: semantic_tokens::TOKEN_MODIFIERS.to_vec(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![":".to_string(), ".".to_string()]),
                     ..Default::default()
@@ -309,6 +323,19 @@ impl LanguageServer for Backend {
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: target_uri,
             range: Range { start, end },
+        })))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> RpcResult<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(text) = self.docs.get_text(&uri) else { return Ok(None) };
+        let data = semantic_tokens::full(&text);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
         })))
     }
 

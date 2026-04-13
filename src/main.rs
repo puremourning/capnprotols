@@ -7,6 +7,7 @@ mod diagnostics;
 mod document;
 mod index;
 mod schema_capnp;
+mod semantic_tokens;
 mod server;
 
 #[tokio::main(flavor = "multi_thread")]
