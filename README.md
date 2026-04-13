@@ -32,7 +32,7 @@ for editor-resilient highlighting.
   index is retained across compile failures so completion and goto stay useful
   while you have a syntax error mid-edit.
 
-## Requirements
+## Build Requirements
 
 - Rust toolchain (build only): `cargo`, `rustc`.
 - A Cap'n Proto installation: the `capnp` binary on `$PATH` and its
@@ -49,6 +49,13 @@ Override the search with `CAPNP_SCHEMA=/path/to/schema.capnp` if needed.
 ```sh
 cargo build --release
 # binary at target/release/capnprotols
+```
+
+Or install it onto `$PATH` (under `~/.cargo/bin/`):
+
+```sh
+cargo install --path .
+# binary at ~/.cargo/bin/capnprotols
 ```
 
 ## Configuration
@@ -87,38 +94,17 @@ client works.
 
 ### YouCompleteMe (ycmd)
 
-Add to your `.ycm_extra_conf.py` or YCM language-server config:
+Add to your `.vimrc`:
 
 ```python
-{
-  'name': 'capnp',
-  'cmdline': ['/path/to/capnprotols'],
-  'filetypes': ['capnp'],
-}
+let g:ycm_langauge_server += [
+    \   {
+    \     'name': 'capnprotols',
+    \     'cmdline': [ '/path/to/target/debug/capnprotols' ],
+    \     'filetypes': [ 'capnp' ],
+    \   },
+]
 ```
-
-### Neovim (nvim-lspconfig)
-
-```lua
-local lspconfig = require('lspconfig')
-local configs = require('lspconfig.configs')
-
-if not configs.capnprotols then
-  configs.capnprotols = {
-    default_config = {
-      cmd = { '/path/to/capnprotols' },
-      filetypes = { 'capnp' },
-      root_dir = lspconfig.util.root_pattern('.git'),
-    },
-  }
-end
-lspconfig.capnprotols.setup({})
-```
-
-### VS Code
-
-A standalone extension isn't bundled. Use a generic LSP-client extension and
-point it at the binary with filetype `capnp`.
 
 ## Architecture notes
 

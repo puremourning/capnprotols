@@ -1,0 +1,72 @@
+{
+  "name": "capnprotols-vscode",
+  "displayName": "Cap'n Proto",
+  "description": "Language server support for Cap'n Proto schema files (capnprotols).",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:capnp"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "capnp",
+        "aliases": [
+          "Cap'n Proto",
+          "capnp"
+        ],
+        "extensions": [
+          ".capnp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "capnprotols",
+      "properties": {
+        "capnprotols.serverPath": {
+          "type": "string",
+          "default": "capnprotols",
+          "description": "Path to the capnprotols binary. Defaults to looking on $PATH."
+        },
+        "capnprotols.compilerPath": {
+          "type": "string",
+          "default": "capnp",
+          "description": "Path to the capnp binary used by the language server."
+        },
+        "capnprotols.importPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra -I import paths passed to capnp compile."
+        },
+        "capnprotols.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace LSP traffic to the Output panel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  }
+}
