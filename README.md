@@ -100,7 +100,7 @@ Add to your `.vimrc`:
 let g:ycm_langauge_server += [
     \   {
     \     'name': 'capnprotols',
-    \     'cmdline': [ '/path/to/target/debug/capnprotols' ],
+    \     'cmdline': [ '/path/to/capnprotols' ],
     \     'filetypes': [ 'capnp' ],
     \   },
 ]
