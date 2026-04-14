@@ -15,6 +15,7 @@ use crate::aliases::strip_comments;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockKind {
     Struct,
+    Enum,
     Group,
     Union,
     Other,
@@ -30,14 +31,13 @@ struct OpenBrace {
 /// Compute the next ordinal to suggest at `cursor`. Returns `None` if the cursor isn't
 /// inside a struct.
 pub fn next_ordinal_at(text: &str, cursor: usize) -> Option<u32> {
-    // Comment and string contents shouldn't influence brace nesting or ordinal scanning.
     let cleaned = strip_for_scan(text);
-    let outer = enclosing_struct(&cleaned, cursor)?;
-    // The struct may not be closed yet (the user is mid-edit). Scan to end-of-text in
-    // that case so we still see the existing fields.
+    let outer = enclosing_struct_or_enum(&cleaned, cursor)?;
+    // The block may not be closed yet (the user is mid-edit). Scan to end-of-text in
+    // that case so we still see the existing fields/enumerants.
     let close = matching_close(&cleaned, outer.brace_byte).unwrap_or(cleaned.len());
     let body = &cleaned[outer.brace_byte + 1..close];
-    let max = scan_max_ordinal(body);
+    let max = scan_max_ordinal(body, outer.kind);
     Some(max.map_or(0, |m| m + 1))
 }
 
@@ -66,8 +66,8 @@ fn strip_for_scan(src: &str) -> String {
 }
 
 /// Walk forward, building a stack of open braces with the kind of block they open. Stop
-/// when we pass `cursor`. Returns the topmost (innermost) `struct`-kind brace still open.
-fn enclosing_struct(text: &str, cursor: usize) -> Option<OpenBrace> {
+/// when we pass `cursor`. Returns the topmost (innermost) struct-or-enum brace still open.
+fn enclosing_struct_or_enum(text: &str, cursor: usize) -> Option<OpenBrace> {
     let bytes = text.as_bytes();
     let cursor = cursor.min(bytes.len());
     let mut stack: Vec<OpenBrace> = Vec::new();
@@ -75,7 +75,6 @@ fn enclosing_struct(text: &str, cursor: usize) -> Option<OpenBrace> {
     while i < cursor {
         let b = bytes[i];
         if b == b'{' {
-            // Determine what opened this brace by looking at the preceding token sequence.
             stack.push(OpenBrace {
                 brace_byte: i,
                 kind: classify_block(text, i),
@@ -85,11 +84,10 @@ fn enclosing_struct(text: &str, cursor: usize) -> Option<OpenBrace> {
         }
         i += 1;
     }
-    // Innermost struct is the topmost Struct in the stack.
     stack
         .into_iter()
         .rev()
-        .find(|f| f.kind == BlockKind::Struct)
+        .find(|f| matches!(f.kind, BlockKind::Struct | BlockKind::Enum))
 }
 
 /// Classify what kind of block an opening `{` belongs to by scanning the tokens that
@@ -120,6 +118,8 @@ fn classify_block(text: &str, brace_byte: usize) -> BlockKind {
     // a field type whose body is a brace-delimited declaration.
     if words.iter().any(|w| *w == "struct") {
         BlockKind::Struct
+    } else if words.iter().any(|w| *w == "enum") {
+        BlockKind::Enum
     } else if words.iter().any(|w| *w == "union") {
         BlockKind::Union
     } else if words.iter().any(|w| *w == "group") {
@@ -153,18 +153,23 @@ fn matching_close(text: &str, open_byte: usize) -> Option<usize> {
     None
 }
 
-/// Largest `@<n>` ordinal in `body`, ignoring any inside *nested* `struct ... {}` blocks
-/// (whose ordinals are scoped separately). Groups and unions are walked through normally.
-fn scan_max_ordinal(body: &str) -> Option<u32> {
+/// Largest `@<n>` ordinal in `body`, scoped to the enclosing block's own ID space.
+/// For a struct: groups/unions share the parent's ID space (so we descend through them),
+/// but nested `struct { ... }` and `enum { ... }` each open their own space and are skipped.
+/// For an enum: every nested block opens a different space, so all of them are skipped.
+fn scan_max_ordinal(body: &str, outer: BlockKind) -> Option<u32> {
     let bytes = body.as_bytes();
     let mut max: Option<u32> = None;
     let mut i = 0;
     while i < bytes.len() {
-        // Skip nested struct blocks entirely.
         if bytes[i] == b'{' {
-            // We are inside the parent struct's body; any { encountered opens a sub-block.
-            // If it opens a nested struct, skip past its matching }. Otherwise descend.
-            if classify_block(body, i) == BlockKind::Struct {
+            let kind = classify_block(body, i);
+            let crosses_scope = match outer {
+                BlockKind::Struct => matches!(kind, BlockKind::Struct | BlockKind::Enum),
+                BlockKind::Enum => true,
+                _ => false,
+            };
+            if crosses_scope {
                 if let Some(close) = matching_close(body, i) {
                     i = close + 1;
                     continue;
@@ -172,7 +177,6 @@ fn scan_max_ordinal(body: &str) -> Option<u32> {
                     break;
                 }
             }
-            // Group/union/other — descend (counted by the bare iteration).
         }
         if bytes[i] == b'@' {
             let mut j = i + 1;
@@ -241,6 +245,28 @@ mod tests {
     #[test]
     fn outside_struct_returns_none() {
         assert_eq!(ord_at("@|"), None);
+    }
+
+    #[test]
+    fn enum_ordinals() {
+        assert_eq!(ord_at("enum Side { buy @0; sell @|"), Some(1));
+    }
+
+    #[test]
+    fn empty_enum() {
+        assert_eq!(ord_at("enum E { first @|"), Some(0));
+    }
+
+    #[test]
+    fn enum_inside_struct_has_own_space() {
+        let src = "struct S {\n  foo @0 :Text;\n  bar @1 :UInt8;\n  enum Kind {\n    a @0;\n    b @|";
+        assert_eq!(ord_at(src), Some(1));
+    }
+
+    #[test]
+    fn struct_ignores_nested_enum_ordinals() {
+        let src = "struct S {\n  enum K { a @0; b @1; }\n  foo @0 :Text;\n  bar @|";
+        assert_eq!(ord_at(src), Some(1));
     }
 
     #[test]
