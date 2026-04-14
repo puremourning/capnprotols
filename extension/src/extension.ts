@@ -20,6 +20,11 @@ export function activate(_context: vscode.ExtensionContext) {
   const initializationOptions = {
     compilerPath: config.get<string>("compilerPath"),
     importPaths: config.get<string[]>("importPaths"),
+    format: {
+      enabled: config.get<boolean>("format.enabled"),
+      maxWidth: config.get<number>("format.maxWidth"),
+      warnLongLines: config.get<boolean>("format.warnLongLines"),
+    },
   };
 
   const clientOptions: LanguageClientOptions = {

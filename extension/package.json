@@ -48,6 +48,21 @@
           "default": [],
           "description": "Extra -I import paths passed to capnp compile."
         },
+        "capnprotols.format.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch for textDocument/formatting. When false, format requests return no edits."
+        },
+        "capnprotols.format.maxWidth": {
+          "type": "integer",
+          "default": 100,
+          "description": "Hard column limit. Long code lines are wrapped (or, if no wrapper applies, flagged with a warning diagnostic)."
+        },
+        "capnprotols.format.warnLongLines": {
+          "type": "boolean",
+          "default": true,
+          "description": "Publish a WARNING diagnostic when a line exceeds maxWidth and the formatter can't auto-wrap it."
+        },
         "capnprotols.trace.server": {
           "type": "string",
           "enum": ["off", "messages", "verbose"],

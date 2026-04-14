@@ -193,6 +193,7 @@ impl LanguageServer for Backend {
                 )),
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
                     retrigger_characters: Some(vec![",".to_string()]),
@@ -378,6 +379,27 @@ impl LanguageServer for Backend {
             uri: target_uri,
             range: Range { start, end },
         })))
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> RpcResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let config = self.config.read().await.clone();
+        if !config.format.enabled {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(text) = self.docs.get_text(&uri) else { return Ok(None) };
+        let Some(out) = crate::format::format_document(&text, &config.format) else {
+            return Ok(Some(Vec::new()));
+        };
+        // TODO: surface out.warnings via publishDiagnostics on a follow-up tick.
+        let _ = out.warnings;
+        if out.text == text {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(Some(line_diff_edits(&text, &out.text)))
     }
 
     async fn signature_help(
@@ -838,6 +860,78 @@ async fn generate_capnp_id(compiler: &str) -> Option<String> {
     }
     let s = std::str::from_utf8(&output.stdout).ok()?.trim();
     s.starts_with("@0x").then(|| s.to_string())
+}
+
+/// Compute a minimal set of `TextEdit`s that transform `old` into `new` by diffing line
+/// by line and returning one TextEdit per contiguous run of changed lines. Keeps the
+/// editor's cursor stable in unchanged regions instead of yanking it to the start the
+/// way a single full-document edit does.
+fn line_diff_edits(old: &str, new: &str) -> Vec<TextEdit> {
+    use similar::{ChangeTag, TextDiff};
+
+    let diff = TextDiff::configure()
+        .algorithm(similar::Algorithm::Myers)
+        .diff_lines(old, new);
+
+    let mut edits: Vec<TextEdit> = Vec::new();
+    // Walk grouped operations. Each non-Equal `ChangeTag` run becomes one TextEdit
+    // covering the deleted (old) line range, replaced by the inserted (new) text.
+    let mut old_line: u32 = 0; // 0-based line in `old`
+    let mut pending_delete_start: Option<u32> = None;
+    let mut pending_delete_end: u32 = 0;
+    let mut pending_insert_text = String::new();
+
+    let flush =
+        |start: Option<u32>, end: u32, text: &mut String, edits: &mut Vec<TextEdit>| {
+            let Some(s) = start else { return };
+            let new_text = std::mem::take(text);
+            edits.push(TextEdit {
+                range: Range {
+                    start: Position::new(s, 0),
+                    end: Position::new(end, 0),
+                },
+                new_text,
+            });
+        };
+
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                // Close out any pending delete/insert run.
+                flush(
+                    pending_delete_start.take(),
+                    pending_delete_end,
+                    &mut pending_insert_text,
+                    &mut edits,
+                );
+                old_line += 1;
+            }
+            ChangeTag::Delete => {
+                if pending_delete_start.is_none() {
+                    pending_delete_start = Some(old_line);
+                    pending_delete_end = old_line;
+                }
+                pending_delete_end = old_line + 1;
+                old_line += 1;
+            }
+            ChangeTag::Insert => {
+                if pending_delete_start.is_none() {
+                    // Pure insert (no surrounding delete): an empty range at the current
+                    // old-line position.
+                    pending_delete_start = Some(old_line);
+                    pending_delete_end = old_line;
+                }
+                pending_insert_text.push_str(change.value());
+            }
+        }
+    }
+    flush(
+        pending_delete_start,
+        pending_delete_end,
+        &mut pending_insert_text,
+        &mut edits,
+    );
+    edits
 }
 
 /// Cap'n Proto's built-in primitive types, plus the parametric ones. Always offered in

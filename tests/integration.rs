@@ -432,6 +432,128 @@ fn signature_help_for_list() {
 }
 
 #[test]
+fn formatting_emits_minimal_per_line_edits() {
+    // Only one line is dirty; the formatter should return a TextEdit covering just that
+    // line range, not the whole file. This keeps editor cursors stable on save-format.
+    let mut c = LspClient::start();
+    let proj = TempProject::with_fixtures(&[]);
+    let path = proj.path("partial.capnp");
+    // Lines 1, 2, 4, 5 are clean; line 3 has the bad indent.
+    let dirty = "@0xeaf06436acd04fdd;\nstruct A {\n        foo @0 :Text;\n  bar @1 :UInt8;\n}\n";
+    std::fs::write(&path, dirty).unwrap();
+    let uri = format!("file://{}", path.display());
+    c.open(&uri, dirty);
+
+    let r = c.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 2, "insertSpaces": true },
+        }),
+    );
+    let edits = r["result"].as_array().expect("array of edits");
+    assert!(!edits.is_empty(), "expected at least one edit");
+    // No edit should cover the whole document. The first clean line is line 0
+    // (`@0x...;`), so a 0-length edit at start is fine, but a single edit spanning
+    // line 0 to past line 3 would mean we did a full-doc rewrite.
+    for edit in edits {
+        let start_line = edit["range"]["start"]["line"].as_u64().unwrap();
+        let end_line = edit["range"]["end"]["line"].as_u64().unwrap();
+        assert!(
+            !(start_line == 0 && end_line >= 4),
+            "edit covers the whole document: {edit:?}"
+        );
+    }
+    c.shutdown();
+}
+
+#[test]
+fn formatting_returns_text_edit_for_dirty_file() {
+    let mut c = LspClient::start();
+    let proj = TempProject::with_fixtures(&[]);
+    let path = proj.path("dirty.capnp");
+    let dirty = "@0xeaf06436acd04fd4;\nstruct A {\n        foo @0:Text;\n}\n";
+    std::fs::write(&path, dirty).unwrap();
+    let uri = format!("file://{}", path.display());
+    c.open(&uri, dirty);
+
+    let r = c.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 2, "insertSpaces": true },
+        }),
+    );
+    let edits = r["result"].as_array().expect("array of edits");
+    assert!(!edits.is_empty(), "expected at least one edit");
+    let combined: String = edits
+        .iter()
+        .map(|e| e["newText"].as_str().unwrap_or(""))
+        .collect();
+    assert!(combined.contains("  foo @0 :Text;"), "got combined:\n{combined}");
+    c.shutdown();
+}
+
+#[test]
+fn formatting_returns_empty_for_clean_file() {
+    let mut c = LspClient::start();
+    let proj = TempProject::with_fixtures(&["types.capnp"]);
+    let uri = proj.uri("types.capnp");
+    let text = proj.text("types.capnp");
+    c.open(&uri, &text);
+
+    // First normalise via our own formatter so the assertion is stable regardless of
+    // how the fixture was authored.
+    let pre = c.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 2, "insertSpaces": true },
+        }),
+    );
+    if let Some(edits) = pre["result"].as_array() {
+        if let Some(first) = edits.first() {
+            let formatted = first["newText"].as_str().unwrap().to_string();
+            std::fs::write(proj.path("types.capnp"), &formatted).unwrap();
+            c.change(&uri, 2, &formatted);
+        }
+    }
+
+    let r = c.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 2, "insertSpaces": true },
+        }),
+    );
+    let edits = r["result"].as_array().expect("array of edits");
+    assert!(edits.is_empty(), "expected no edits on clean file, got {edits:?}");
+    c.shutdown();
+}
+
+#[test]
+fn formatting_skipped_on_parse_error() {
+    let mut c = LspClient::start();
+    let proj = TempProject::with_fixtures(&[]);
+    let path = proj.path("broken.capnp");
+    let broken = "@0xeaf06436acd04fd5;\nstruct A { BROKEN_TOKEN!!! }\n";
+    std::fs::write(&path, broken).unwrap();
+    let uri = format!("file://{}", path.display());
+    c.open(&uri, broken);
+
+    let r = c.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "options": { "tabSize": 2, "insertSpaces": true },
+        }),
+    );
+    let edits = r["result"].as_array().expect("array");
+    assert!(edits.is_empty(), "expected no edits on broken file, got {edits:?}");
+    c.shutdown();
+}
+
+#[test]
 fn semantic_tokens_returns_data() {
     let mut c = LspClient::start();
     let proj = user_project();

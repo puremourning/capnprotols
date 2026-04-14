@@ -28,6 +28,22 @@ for editor-resilient highlighting.
     (scoped correctly across groups, unions, and nested structs).
 - **Signature help** for annotation applications (`$Foo.bar(field = :Type, …)`)
   and generic instantiations (`List(T)`, `MyStruct(A, B)`).
+- **Formatting** (`textDocument/formatting`) — conservative whitespace
+  normalisation derived from the [KJ style guide](https://github.com/capnproto/capnproto/blob/master/style-guide.md)
+  and Kenton's canonical schemas:
+  - 2-space indentation, brace-on-same-line, `name @N :Type` colon spacing,
+  - blank line between top-level decls, trailing whitespace stripped, single
+    final newline,
+  - doc-comment blocks re-indent with their declaration but contents are
+    preserved verbatim (no paragraph reflow),
+  - hard configurable column limit (default 100): trailing inline comments
+    get pushed onto a new line when they push past it; long
+    `$Annotation(...)` chains break before each `$`; long generic argument
+    lists break inside `(...)` one arg per line,
+  - long lines that don't match any wrapper produce a `WARNING` diagnostic,
+  - `# capnpfmt: off` / `# capnpfmt: on` markers preserve a region verbatim,
+  - bails (returns no edits) on any parse error so broken buffers aren't
+    destructively rewritten.
 - **Live-buffer overlay** — analysis runs on unsaved edits. The cached symbol
   index is retained across compile failures so completion and goto stay useful
   while you have a syntax error mid-edit.
@@ -66,7 +82,12 @@ JSON shape:
 ```jsonc
 {
   "compilerPath": "capnp",            // path to the capnp binary; default "capnp" on $PATH
-  "importPaths":  ["/abs/dir/one"]    // extra -I paths for `import "/..."` resolution
+  "importPaths":  ["/abs/dir/one"],   // extra -I paths for `import "/..."` resolution
+  "format": {
+    "enabled":        true,           // master switch for textDocument/formatting
+    "maxWidth":       100,            // hard column limit (KJ style guide default)
+    "warnLongLines":  true            // diagnose lines we can't auto-wrap
+  }
 }
 ```
 

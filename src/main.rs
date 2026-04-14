@@ -5,6 +5,7 @@ mod compiler;
 mod config;
 mod diagnostics;
 mod document;
+mod format;
 mod index;
 mod ordinals;
 mod schema_capnp;

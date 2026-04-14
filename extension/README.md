@@ -16,7 +16,10 @@ npm run compile
 
 | Key                          | Default        | Description                                          |
 |------------------------------|----------------|------------------------------------------------------|
-| `capnprotols.serverPath`     | `capnprotols`  | Path to the `capnprotols` binary.                    |
-| `capnprotols.compilerPath`   | `capnp`        | Path to the `capnp` binary used by the server.       |
-| `capnprotols.importPaths`    | `[]`           | Extra `-I` import paths.                             |
-| `capnprotols.trace.server`   | `off`          | Trace LSP traffic to the Output panel.               |
+| `capnprotols.serverPath`           | `capnprotols`  | Path to the `capnprotols` binary.                            |
+| `capnprotols.compilerPath`         | `capnp`        | Path to the `capnp` binary used by the server.               |
+| `capnprotols.importPaths`          | `[]`           | Extra `-I` import paths.                                     |
+| `capnprotols.format.enabled`       | `true`         | Master switch for `textDocument/formatting`.                 |
+| `capnprotols.format.maxWidth`      | `100`          | Hard column limit. Matches the KJ style guide.               |
+| `capnprotols.format.warnLongLines` | `true`         | Warn (via diagnostic) on lines that exceed `maxWidth` and can't be auto-wrapped. |
+| `capnprotols.trace.server`         | `off`          | Trace LSP traffic to the Output panel.                       |

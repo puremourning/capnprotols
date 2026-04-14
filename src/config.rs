@@ -10,6 +10,31 @@ pub struct InitOptions {
 
     /// Additional `-I` import paths passed to `capnp compile`.
     pub import_paths: Vec<PathBuf>,
+
+    /// Formatter settings (textDocument/formatting).
+    pub format: FormatOptions,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FormatOptions {
+    /// Master switch. When false, formatting requests return no edits and we don't
+    /// emit long-line warning diagnostics.
+    pub enabled: bool,
+    /// Hard column limit. Matches the KJ style guide default.
+    pub max_width: u32,
+    /// Publish a `WARNING` Diagnostic when a long line can't be auto-wrapped.
+    pub warn_long_lines: bool,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_width: 100,
+            warn_long_lines: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +46,7 @@ pub struct Config {
     /// `include/` directory). Includes user-supplied import_paths plus the capnp install
     /// include root derived from the compiler binary location.
     pub resolution_roots: Vec<PathBuf>,
+    pub format: FormatOptions,
 }
 
 impl Config {
@@ -68,6 +94,7 @@ impl Config {
             compiler_path,
             import_paths: opts.import_paths,
             resolution_roots,
+            format: opts.format,
         }
     }
 }
