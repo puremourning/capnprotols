@@ -320,8 +320,6 @@ impl LanguageServer for Backend {
             }
         }
 
-        // Resolve cursor to a Node — via FSI when available, falling back to a name-based
-        // index lookup for cases the FSI doesn't track (e.g. `List(T)` type parameters).
         let node = index
             .identifier_at(&path, byte)
             .filter(|i| i.target_node_id != 0)

@@ -148,6 +148,64 @@ fn goto_definition_resolves_local_alias() {
 }
 
 #[test]
+fn goto_definition_falls_back_for_nested_type_in_generic() {
+    // The type parameter of `List(Inner)` is a nested struct — capnp's FSI doesn't
+    // record the inner position, so this exercises the name-based fallback resolving
+    // a nested (dotted displayName) target.
+    let mut c = LspClient::start();
+    let proj = user_project();
+    let uri = proj.uri("user.capnp");
+    let text = proj.text("user.capnp");
+    c.open(&uri, &text);
+
+    let (line, col) = locate_inside(&text, "List(Inner)", "Inner");
+    let r = c.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+    );
+    let result = &r["result"];
+    assert!(result.is_object(), "expected definition, got {r}");
+    let target = result["uri"].as_str().unwrap();
+    assert!(target.ends_with("/user.capnp"), "got {target}");
+    let target_text = std::fs::read_to_string(&proj.path("user.capnp")).unwrap();
+    let target_line = result["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let decl = target_text.lines().nth(target_line).unwrap_or("");
+    assert!(
+        decl.contains("struct Inner"),
+        "expected to land on `struct Inner`, got line: {:?}", decl
+    );
+    c.shutdown();
+}
+
+#[test]
+fn goto_definition_for_self_nested_in_generic() {
+    // Mirrors the real-world case: `struct UserLike { struct SamlIdentity {...};
+    // samlIdentities @0 :List(SamlIdentity); }` — the cursor on SamlIdentity inside
+    // the List should land on the nested struct declaration.
+    let mut c = LspClient::start();
+    let proj = user_project();
+    let uri = proj.uri("user.capnp");
+    let text = proj.text("user.capnp");
+    c.open(&uri, &text);
+
+    let (line, col) = locate_inside(&text, "List(SamlIdentity)", "SamlIdentity");
+    let r = c.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+    );
+    let result = &r["result"];
+    assert!(result.is_object(), "expected definition, got {r}");
+    let target_line = result["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let target_text = std::fs::read_to_string(&proj.path("user.capnp")).unwrap();
+    let decl = target_text.lines().nth(target_line).unwrap_or("");
+    assert!(
+        decl.contains("struct SamlIdentity"),
+        "expected `struct SamlIdentity`, got {:?}", decl
+    );
+    c.shutdown();
+}
+
+#[test]
 fn goto_definition_falls_back_for_generic_parameters() {
     // CGR's FSI has no entry for `AuthToken` inside `List(AuthToken)`, so we exercise the
     // name-based fallback.

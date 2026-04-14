@@ -424,8 +424,10 @@ fn type_target_id(ty: &schema_capnp::type_::Reader) -> Option<u64> {
     }
 }
 
-/// True if two paths refer to the same on-disk location, accounting for capnp's habit of
-/// stripping leading `/` from absolute paths in displayName.
+/// True if two paths refer to the same on-disk location. capnp's displayName for nested
+/// nodes can be just a basename (no path prefix) while we hold the absolute overlay
+/// path, so we accept a basename match as well — the overlay basename is unique enough
+/// (`.capnprotols.<file>`) that this doesn't conflate unrelated files.
 fn paths_match(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -434,7 +436,13 @@ fn paths_match(a: &Path, b: &Path) -> bool {
     let bs = b.to_string_lossy();
     let ans = as_.strip_prefix('/').unwrap_or(&as_);
     let bns = bs.strip_prefix('/').unwrap_or(&bs);
-    ans == bns
+    if ans == bns {
+        return true;
+    }
+    match (a.file_name(), b.file_name()) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn file_of_display_name(display_name: &str) -> PathBuf {
