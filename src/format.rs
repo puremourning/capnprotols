@@ -514,6 +514,11 @@ fn wrap_line_recursive(line: &str, max: usize) -> Vec<String> {
         if line.chars().count() <= max || depth_left == 0 {
             return vec![line];
         }
+        // Whole-line comment: never restructure, contents are user-authored prose. The
+        // code wrappers would happily break on `(`/`,` in the comment text otherwise.
+        if line.trim_start().starts_with('#') {
+            return vec![line];
+        }
         // Trailing-comment relocation always strictly improves; do it first.
         let mut chunks: Vec<String> = if let Some(split) = wrap_trailing_comment(&line, max) {
             split
@@ -870,6 +875,20 @@ mod tests {
         let src = "@0xeaf06436acd04fdf;\nstruct Pair(K, V) { key @0 :K; value @1 :V; }\nstruct A {\n  m @0 :Pair(\n    KeyType,\n    ValueType);\n}\n";
         let out = format_document(src, &FormatOptions::default()).expect("formatted");
         assert!(out.text.contains("Pair(\n    KeyType,\n    ValueType);"), "user-broken arg list collapsed:\n{}", out.text);
+    }
+
+    #[test]
+    fn long_whole_line_comment_is_never_restructured() {
+        // A single long doc-comment line containing parens/commas in its prose must
+        // pass through verbatim — code wrappers must not touch comment text.
+        let src = "@0xeaf06436acd04fe5;\nstruct A {\n  x @0 :Text;\n  # The unique identifier of the user within the IdP (NameID, or other identifier determined by # the IdentityProvider metadata), e.g.  \"1234567890\". This is used.\n}\n";
+        let opts = FormatOptions { max_width: 80, ..FormatOptions::default() };
+        let out = format_document(src, &opts).expect("formatted");
+        // The long comment should be preserved on a single line.
+        let comment_line = out.text.lines().find(|l| l.trim_start().starts_with("# The unique"))
+            .expect("comment line missing");
+        assert!(comment_line.contains("(NameID, or other identifier"), "comment was broken at parens:\n{}", out.text);
+        assert!(comment_line.contains("This is used."), "comment was truncated:\n{}", out.text);
     }
 
     #[test]
