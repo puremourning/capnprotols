@@ -352,8 +352,28 @@ impl LanguageServer for Backend {
             }
         };
         let target_rope = Rope::from_str(&target_text);
-        let start = byte_to_position(&target_rope, node.start_byte as usize);
-        let end = byte_to_position(&target_rope, node.end_byte as usize);
+        // Prefer narrowing the range to just the declared name (so the editor lands on
+        // `Foo` rather than the leading `struct` keyword). Fall back to the whole range
+        // if we can't find the name token, e.g. an unusual declaration shape.
+        let leaf_name = node.short_name.rsplit('.').next().unwrap_or(&node.short_name);
+        let (start, end) = locate_decl_name(
+            &target_text,
+            node.start_byte as usize,
+            node.end_byte as usize,
+            leaf_name,
+        )
+        .map(|(s, e)| {
+            (
+                byte_to_position(&target_rope, s),
+                byte_to_position(&target_rope, e),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                byte_to_position(&target_rope, node.start_byte as usize),
+                byte_to_position(&target_rope, node.end_byte as usize),
+            )
+        });
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
             uri: target_uri,
             range: Range { start, end },
@@ -638,6 +658,32 @@ impl LanguageServer for Backend {
         }));
         Ok(Some(CompletionResponse::Array(items)))
     }
+}
+
+/// Within `text[start..end]`, find the byte range of the first occurrence of `name` as a
+/// whole identifier token. Used to narrow a node's whole-declaration range down to just
+/// its name (so goto lands on `Foo` rather than the `struct` keyword).
+fn locate_decl_name(text: &str, start: usize, end: usize, name: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let end = end.min(bytes.len());
+    if start >= end || name.is_empty() {
+        return None;
+    }
+    let needle = name.as_bytes();
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = start;
+    while i + needle.len() <= end {
+        if &bytes[i..i + needle.len()] == needle {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_idx = i + needle.len();
+            let after_ok = after_idx >= bytes.len() || !is_ident_byte(bytes[after_idx]);
+            if before_ok && after_ok {
+                return Some((i, after_idx));
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Map a compiler-reported file path back to a real on-disk path. The capnp compiler

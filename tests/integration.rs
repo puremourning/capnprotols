@@ -202,6 +202,13 @@ fn goto_definition_for_self_nested_in_generic() {
         decl.contains("struct SamlIdentity"),
         "expected `struct SamlIdentity`, got {:?}", decl
     );
+    // Range should point at the name `SamlIdentity` itself, not the `struct` keyword.
+    let start_col = result["range"]["start"]["character"].as_u64().unwrap() as usize;
+    let end_col = result["range"]["end"]["character"].as_u64().unwrap() as usize;
+    assert_eq!(
+        &decl[start_col..end_col], "SamlIdentity",
+        "expected target range to span the name token; line was {decl:?}"
+    );
     c.shutdown();
 }
 
