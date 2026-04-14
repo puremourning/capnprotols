@@ -104,6 +104,12 @@ fn format_with_verbatim(
     let mut depth: i32 = 0;
     let mut paren_depth: i32 = 0;
     let mut just_emitted_newline = true;
+    // Indent of the line currently being emitted. Updated whenever we emit a Newline.
+    let mut current_line_indent: usize = 0;
+    // Stack of line-indents captured at the moment each `(` / `[` was emitted. Used to
+    // anchor soft-break continuation inside parens — items inside `(` written at
+    // `anchor + INDENT_UNIT`, regardless of how nested the open paren itself was.
+    let mut paren_anchors: Vec<usize> = Vec::new();
 
     let mut i = 0;
     while i < tokens.len() {
@@ -144,7 +150,14 @@ fn format_with_verbatim(
             _ => depth,
         };
 
-        let sep = separator(prev, tok, depth_for_this as usize, paren_depth);
+        let paren_anchor = paren_anchors.last().copied();
+        let sep = separator(
+            prev,
+            tok,
+            depth_for_this as usize,
+            paren_depth,
+            paren_anchor,
+        );
         match sep {
             Sep::None => {}
             Sep::Space => {
@@ -163,6 +176,7 @@ fn format_with_verbatim(
                 for _ in 0..indent {
                     out.push(' ');
                 }
+                current_line_indent = indent;
             }
         }
 
@@ -172,8 +186,14 @@ fn format_with_verbatim(
         match tok.text.as_str() {
             "{" => depth += 1,
             "}" => depth -= 1,
-            "(" | "[" => paren_depth += 1,
-            ")" | "]" => paren_depth -= 1,
+            "(" | "[" => {
+                paren_depth += 1;
+                paren_anchors.push(current_line_indent);
+            }
+            ")" | "]" => {
+                paren_depth -= 1;
+                paren_anchors.pop();
+            }
             _ => {}
         }
         i += 1;
@@ -205,6 +225,11 @@ struct Tok {
     /// i.e. between the prior token and this one, two or more `\n` separated only by
     /// whitespace. Lets us preserve user-intentional vertical grouping.
     blank_line_before: bool,
+    /// True if the source had at least one `\n` between the prior token and this one
+    /// (not necessarily blank). Used as a clang-format-style "soft break hint": when
+    /// the user manually broke an annotation chain or generic arg list across lines,
+    /// we keep it broken even when it would otherwise fit on one line.
+    newline_before: bool,
 }
 
 fn collect_leaves(root: tree_sitter::Node<'_>, src: &str) -> Vec<Tok> {
@@ -226,6 +251,7 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
         let text = src[range.clone()].to_string();
         let starts_line = is_line_start(bytes, range.start);
         let blank_line_before = blank_line_before(bytes, range.start);
+        let newline_before = newline_before(bytes, range.start);
         out.push(Tok {
             kind: node.kind().to_string(),
             text,
@@ -233,6 +259,7 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
             byte_end: range.end,
             starts_line,
             blank_line_before,
+            newline_before,
         });
         return;
     }
@@ -246,6 +273,7 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
         let text = src[range.clone()].to_string();
         let starts_line = is_line_start(bytes, range.start);
         let blank_line_before = blank_line_before(bytes, range.start);
+        let newline_before = newline_before(bytes, range.start);
         out.push(Tok {
             kind: node.kind().to_string(),
             text,
@@ -253,6 +281,7 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
             byte_end: range.end,
             starts_line,
             blank_line_before,
+            newline_before,
         });
         return;
     }
@@ -265,22 +294,27 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
 /// True if the source between the prior non-whitespace byte and `pos` contains 2+
 /// newlines. Indicates the user explicitly left a blank line.
 fn blank_line_before(bytes: &[u8], pos: usize) -> bool {
-    let mut newlines = 0;
+    count_newlines_before(bytes, pos) >= 2
+}
+
+/// True if the source between the prior non-whitespace byte and `pos` contains at least
+/// one `\n`. Used as a soft break hint.
+fn newline_before(bytes: &[u8], pos: usize) -> bool {
+    count_newlines_before(bytes, pos) >= 1
+}
+
+fn count_newlines_before(bytes: &[u8], pos: usize) -> usize {
+    let mut n = 0;
     let mut i = pos;
     while i > 0 {
         match bytes[i - 1] {
-            b'\n' => {
-                newlines += 1;
-                if newlines >= 2 {
-                    return true;
-                }
-            }
+            b'\n' => n += 1,
             b' ' | b'\t' | b'\r' => {}
-            _ => return false,
+            _ => return n,
         }
         i -= 1;
     }
-    false
+    n
 }
 
 fn is_line_start(bytes: &[u8], pos: usize) -> bool {
@@ -305,8 +339,16 @@ enum Sep {
 /// Decide what whitespace separates `tok` from `prev`. `depth` is the indent depth that
 /// applies to `tok` (closing `}` already has depth-1 here). `paren_depth` is the number
 /// of open `(`/`[` we're inside, which affects spacing around `=` (kwarg form vs
-/// statement-level assignment).
-fn separator(prev: Option<&Tok>, tok: &Tok, depth: usize, paren_depth: i32) -> Sep {
+/// statement-level assignment). `paren_anchor` is the leading indent of the line
+/// containing the innermost open `(`/`[`, if any — anchors soft-break continuation
+/// inside that bracket.
+fn separator(
+    prev: Option<&Tok>,
+    tok: &Tok,
+    depth: usize,
+    paren_depth: i32,
+    paren_anchor: Option<usize>,
+) -> Sep {
     let prev = match prev {
         None => return Sep::Newline { blank: false, indent: depth * INDENT_UNIT },
         Some(p) => p,
@@ -315,6 +357,30 @@ fn separator(prev: Option<&Tok>, tok: &Tok, depth: usize, paren_depth: i32) -> S
     let t = tok.text.as_str();
 
     // === Highest-priority rules: things that override generic punctuation handling ===
+
+    // Soft-break preservation: if the user manually broke before this token in the
+    // source AND it's a position where a break makes sense, keep it broken even when
+    // the line would otherwise fit. Mirrors clang-format's "preserve user newlines"
+    // philosophy.
+    if tok.newline_before {
+        if t == "$" {
+            // Annotation-chain continuation: hang one indent level beneath the current
+            // statement depth.
+            return Sep::Newline {
+                blank: tok.blank_line_before,
+                indent: depth * INDENT_UNIT + INDENT_UNIT,
+            };
+        }
+        if paren_depth > 0 && (p == "," || p == "(" || p == "[") {
+            // Argument-list continuation: indent relative to the LINE that holds the
+            // innermost open `(`/`[`, so nested brackets pile up correctly. Falls back
+            // to the brace-depth-based indent if we somehow lost the anchor.
+            let cont = paren_anchor
+                .map(|a| a + INDENT_UNIT)
+                .unwrap_or(depth * INDENT_UNIT + INDENT_UNIT);
+            return Sep::Newline { blank: false, indent: cont };
+        }
+    }
 
     // Comments preserve their own-line vs trailing association, and their blank-line
     // separation from the previous token.
@@ -421,36 +487,13 @@ fn enforce_width(text: &str, opts: &FormatOptions) -> (String, Vec<LongLineWarni
     let mut out_lines: Vec<String> = Vec::new();
 
     for raw_line in text.split('\n') {
-        let line = raw_line.to_string();
-        if line.chars().count() <= max {
-            out_lines.push(line);
-            continue;
-        }
-        // Always try trailing-comment relocation first (it strictly improves things by
-        // peeling the comment off the code). Then, if the code line is still over the
-        // limit, try the code-shape wrappers on it.
-        let mut chunks: Vec<String> = if let Some(split) = wrap_trailing_comment(&line, max) {
-            split
-        } else {
-            vec![line]
-        };
-        if chunks[0].chars().count() > max {
-            let code = chunks[0].clone();
-            let wrapped = wrap_annotation_chain(&code, max)
-                .filter(|w| w.iter().all(|l| l.chars().count() <= max))
-                .or_else(|| {
-                    wrap_generic_args(&code, max)
-                        .filter(|w| w.iter().all(|l| l.chars().count() <= max))
-                });
-            if let Some(w) = wrapped {
-                let tail: Vec<String> = chunks.split_off(1);
-                chunks = w.into_iter().chain(tail.into_iter()).collect();
-            }
-        }
+        let chunks = wrap_line_recursive(raw_line, max);
         for l in &chunks {
             if l.chars().count() > max && opts.warn_long_lines {
                 warnings.push(LongLineWarning {
-                    line: (out_lines.len() + chunks.iter().position(|x| x == l).unwrap_or(0)) as u32,
+                    line: (out_lines.len()
+                        + chunks.iter().position(|x| x == l).unwrap_or(0))
+                        as u32,
                     width: l.chars().count() as u32,
                 });
             }
@@ -459,6 +502,49 @@ fn enforce_width(text: &str, opts: &FormatOptions) -> (String, Vec<LongLineWarni
     }
 
     (out_lines.join("\n"), warnings)
+}
+
+/// Wrap a single source line down toward `max_width`, recursing into any wrapped chunk
+/// that's still too wide. Each recursion tries the wrappers in priority order:
+/// trailing-comment relocation, then annotation-chain split, then bracketed-args split.
+/// Accepts any wrap that strictly improves the longest line width over the input.
+/// Bounded by recursion depth to avoid pathological infinite loops on degenerate input.
+fn wrap_line_recursive(line: &str, max: usize) -> Vec<String> {
+    fn go(line: String, max: usize, depth_left: u32) -> Vec<String> {
+        if line.chars().count() <= max || depth_left == 0 {
+            return vec![line];
+        }
+        // Trailing-comment relocation always strictly improves; do it first.
+        let mut chunks: Vec<String> = if let Some(split) = wrap_trailing_comment(&line, max) {
+            split
+        } else {
+            vec![line]
+        };
+        // Then try the code-shape wrappers on the lead chunk.
+        if chunks[0].chars().count() > max {
+            let code = chunks[0].clone();
+            let original_max = code.chars().count();
+            let improvement = |w: &Vec<String>| {
+                w.iter().map(|l| l.chars().count()).max().unwrap_or(0) < original_max
+            };
+            let wrapped = wrap_annotation_chain(&code, max)
+                .filter(&improvement)
+                .or_else(|| wrap_generic_args(&code, max).filter(&improvement));
+            if let Some(w) = wrapped {
+                let tail: Vec<String> = chunks.split_off(1);
+                // Recurse into each wrapped sub-line — covers nested
+                // `$Anno(name="x", fields=[…])` shapes where the inner array
+                // needs further breaking.
+                let mut recursive: Vec<String> = Vec::new();
+                for c in w {
+                    recursive.extend(go(c, max, depth_left - 1));
+                }
+                chunks = recursive.into_iter().chain(tail.into_iter()).collect();
+            }
+        }
+        chunks
+    }
+    go(line.to_string(), max, 8)
 }
 
 /// `    field @0 :Text;  # ...long comment...` -> two lines, comment on its own line at
@@ -495,7 +581,7 @@ fn wrap_annotation_chain(line: &str, _max: usize) -> Option<Vec<String>> {
         return None;
     }
     let indent = leading_indent(line);
-    let inner_indent = format!("{indent}    ");
+    let inner_indent = format!("{indent}{}", " ".repeat(INDENT_UNIT));
     let head = line[..splits[0]].trim_end().to_string();
     let mut out = vec![head];
     for w in 0..splits.len() {
@@ -518,21 +604,25 @@ fn wrap_annotation_chain(line: &str, _max: usize) -> Option<Vec<String>> {
 /// (with continuation indent matching the column of the `(`). Returns None if there's
 /// no outer paren on the line.
 fn wrap_generic_args(line: &str, _max: usize) -> Option<Vec<String>> {
+    wrap_bracketed(line, b'(', b')').or_else(|| wrap_bracketed(line, b'[', b']'))
+}
+
+/// Find the outermost `open..close` pair on the line that contains at least one
+/// top-level (depth-0 inside that pair) comma, and break each element onto its own line.
+fn wrap_bracketed(line: &str, open_byte: u8, close_byte: u8) -> Option<Vec<String>> {
     let bytes = line.as_bytes();
-    let open = bytes.iter().position(|&b| b == b'(')?;
+    let open = bytes.iter().position(|&b| b == open_byte)?;
     let mut depth: i32 = 0;
     let mut close: Option<usize> = None;
     for (i, &b) in bytes.iter().enumerate().skip(open) {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(i);
-                    break;
-                }
+        if b == open_byte {
+            depth += 1;
+        } else if b == close_byte {
+            depth -= 1;
+            if depth == 0 {
+                close = Some(i);
+                break;
             }
-            _ => {}
         }
     }
     let close = close?;
@@ -570,10 +660,10 @@ fn wrap_generic_args(line: &str, _max: usize) -> Option<Vec<String>> {
         return None;
     }
 
-    let head = &line[..=open]; // up to and including '('
-    let tail = &line[close..]; // ')...rest of line'
+    let head = &line[..=open]; // up to and including '(' or '['
+    let tail = &line[close..]; // closing bracket + rest of line
     let indent = leading_indent(line);
-    let arg_indent = format!("{indent}    ");
+    let arg_indent = format!("{indent}{}", " ".repeat(INDENT_UNIT));
     let mut out = vec![head.trim_end().to_string()];
     for (i, arg) in args.iter().enumerate() {
         let suffix = if i + 1 < args.len() { "," } else { "" };
@@ -727,8 +817,10 @@ mod tests {
         // Use a tighter max so the chain definitely needs wrapping.
         let opts = FormatOptions { max_width: 80, ..FormatOptions::default() };
         let out = format_document(src, &opts).expect("formatted");
-        assert!(out.text.contains("\n      $Json.name(\"a_long_external_name\")\n"), "annotation 1 not wrapped:\n{}", out.text);
-        assert!(out.text.contains("\n      $Anno.other(value=\"x\");\n"), "annotation 2 not wrapped:\n{}", out.text);
+        // Continuation indent is one extra INDENT_UNIT (2 spaces) under the field's
+        // depth=1 indent, so 4 spaces total.
+        assert!(out.text.contains("\n    $Json.name(\"a_long_external_name\")\n"), "annotation 1 not wrapped:\n{}", out.text);
+        assert!(out.text.contains("\n    $Anno.other(value=\"x\");\n"), "annotation 2 not wrapped:\n{}", out.text);
         assert!(out.warnings.is_empty(), "unexpected warnings: {:?}", out.warnings);
     }
 
@@ -740,6 +832,7 @@ mod tests {
         let opts = FormatOptions { max_width: 60, ..FormatOptions::default() };
         let out = format_document(src, &opts).expect("formatted");
         assert!(out.text.contains("Pair(\n"), "Pair not opened on its own line:\n{}", out.text);
+        // depth=1 (inside `struct A`), continuation indent = 2+2 = 4 spaces.
         assert!(out.text.contains("    SomeReallyQuiteLongType,\n"), "first arg:\n{}", out.text);
         assert!(out.text.contains("    AnotherSomewhatLongType"), "last arg:\n{}", out.text);
     }
@@ -760,6 +853,49 @@ mod tests {
         let out = format_document(src, &opts).expect("formatted");
         // Field stays on one line; comment got pushed to next line at the field's indent.
         assert!(out.text.contains("\n  foo @0 :Text;\n  # this is a long inline comment"), "comment not relocated:\n{}", out.text);
+    }
+
+    #[test]
+    fn soft_break_keeps_user_wrapped_annotation_chain() {
+        // User wrote each $annotation on its own line. The formatter keeps it broken;
+        // continuation indent is one INDENT_UNIT (2 spaces) deeper than the struct's depth=0.
+        let src = "@0xeaf06436acd04fde;\nstruct Foo\n  $a()\n  $b() {\n  x @0 :Text;\n}\n";
+        let out = format_document(src, &FormatOptions::default()).expect("formatted");
+        assert!(out.text.contains("\nstruct Foo\n  $a()\n  $b() {\n"), "soft breaks lost:\n{}", out.text);
+    }
+
+    #[test]
+    fn soft_break_keeps_user_wrapped_generic_args() {
+        // Continuation indent for the inner args is 2+2 = 4 spaces.
+        let src = "@0xeaf06436acd04fdf;\nstruct Pair(K, V) { key @0 :K; value @1 :V; }\nstruct A {\n  m @0 :Pair(\n    KeyType,\n    ValueType);\n}\n";
+        let out = format_document(src, &FormatOptions::default()).expect("formatted");
+        assert!(out.text.contains("Pair(\n    KeyType,\n    ValueType);"), "user-broken arg list collapsed:\n{}", out.text);
+    }
+
+    #[test]
+    fn long_line_wraps_recursively_into_inner_brackets() {
+        let src = "@0xeaf06436acd04fe1;\nstruct IdentityProvider $key(name=\"foo\", fields=[\"first\", \"second\"]) $key(name=\"baz\", fields=[\"first\", \"second\", \"a\", \"really\", \"long\", \"list\", \"of\", \"fields\", \"that\", \"wraps\", \"over\", \"100\", \"characters\"]) $key(name=\"Bar\", fields=[\"first\", \"frist\"]) {\n  x @0 :Text;\n}\n";
+        let opts = FormatOptions { max_width: 100, ..FormatOptions::default() };
+        let out = format_document(src, &opts).expect("formatted");
+        // depth=0, so $key indent = 2, $key( opens kwargs at 4, fields=[ items at 6.
+        assert!(out.text.contains("\n      \"characters\""), "inner array not wrapped:\n{}", out.text);
+        for (i, line) in out.text.lines().enumerate() {
+            assert!(line.chars().count() <= 100, "line {i} over limit ({} chars): {line:?}", line.chars().count());
+        }
+    }
+
+    #[test]
+    fn long_line_wraps_even_when_inner_chunk_remains_wide() {
+        // Three annotations, middle one has a long array. We can't wrap the array's
+        // contents in v1, but we still want the chain itself to break onto separate
+        // lines — strict improvement over a single 200-char line.
+        let src = "@0xeaf06436acd04fe0;\nstruct A $key(name=\"foo\", fields=[\"first\", \"second\"]) $key(name=\"baz\", fields=[\"a\", \"really\", \"long\", \"list\", \"of\", \"fields\", \"that\", \"wraps\", \"over\", \"100\", \"characters\"]) $key(name=\"Bar\", fields=[\"first\", \"frist\"]) {\n  x @0 :Text;\n}\n";
+        let opts = FormatOptions { max_width: 100, ..FormatOptions::default() };
+        let out = format_document(src, &opts).expect("formatted");
+        // Each $key is on its own line at +4 indent, even if the middle one is still
+        // over the limit.
+        let lines_with_key: Vec<&str> = out.text.lines().filter(|l| l.trim_start().starts_with("$key")).collect();
+        assert_eq!(lines_with_key.len(), 3, "expected 3 broken-out $key lines, got:\n{}", out.text);
     }
 
     #[test]
