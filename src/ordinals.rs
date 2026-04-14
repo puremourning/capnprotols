@@ -28,17 +28,31 @@ struct OpenBrace {
     kind: BlockKind,
 }
 
-/// Compute the next ordinal to suggest at `cursor`. Returns `None` if the cursor isn't
-/// inside a struct.
-pub fn next_ordinal_at(text: &str, cursor: usize) -> Option<u32> {
+/// Suggest valid ordinal values at `cursor` in ascending order: first any gaps in the
+/// existing assignments, then the next-after-max. Returns empty if the cursor isn't
+/// inside a struct or enum. Cap'n Proto requires contiguous ordinals starting from 0, so
+/// gaps (e.g. from a deleted field) are legal slots to fill; when the user is typing @
+/// they're often doing exactly that.
+pub fn suggest_ordinals_at(text: &str, cursor: usize) -> Vec<u32> {
     let cleaned = strip_for_scan(text);
-    let outer = enclosing_struct_or_enum(&cleaned, cursor)?;
-    // The block may not be closed yet (the user is mid-edit). Scan to end-of-text in
-    // that case so we still see the existing fields/enumerants.
+    let Some(outer) = enclosing_struct_or_enum(&cleaned, cursor) else {
+        return Vec::new();
+    };
     let close = matching_close(&cleaned, outer.brace_byte).unwrap_or(cleaned.len());
     let body = &cleaned[outer.brace_byte + 1..close];
-    let max = scan_max_ordinal(body, outer.kind);
-    Some(max.map_or(0, |m| m + 1))
+    let used = collect_ordinals(body, outer.kind);
+    let mut out: Vec<u32> = Vec::new();
+    if let Some(m) = used.iter().copied().max() {
+        for n in 0..=m {
+            if !used.contains(&n) {
+                out.push(n);
+            }
+        }
+        out.push(m + 1);
+    } else {
+        out.push(0);
+    }
+    out
 }
 
 /// Strip both `# ...` line comments and `"..."` string literals — replacing their bytes
@@ -153,13 +167,13 @@ fn matching_close(text: &str, open_byte: usize) -> Option<usize> {
     None
 }
 
-/// Largest `@<n>` ordinal in `body`, scoped to the enclosing block's own ID space.
+/// Collect every `@<n>` ordinal in `body` that belongs to the enclosing block's ID space.
 /// For a struct: groups/unions share the parent's ID space (so we descend through them),
 /// but nested `struct { ... }` and `enum { ... }` each open their own space and are skipped.
 /// For an enum: every nested block opens a different space, so all of them are skipped.
-fn scan_max_ordinal(body: &str, outer: BlockKind) -> Option<u32> {
+fn collect_ordinals(body: &str, outer: BlockKind) -> Vec<u32> {
     let bytes = body.as_bytes();
-    let mut max: Option<u32> = None;
+    let mut out: Vec<u32> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'{' {
@@ -185,7 +199,7 @@ fn scan_max_ordinal(body: &str, outer: BlockKind) -> Option<u32> {
             }
             if j > i + 1 {
                 if let Ok(n) = body[i + 1..j].parse::<u32>() {
-                    max = Some(max.map_or(n, |m| m.max(n)));
+                    out.push(n);
                 }
                 i = j;
                 continue;
@@ -193,7 +207,7 @@ fn scan_max_ordinal(body: &str, outer: BlockKind) -> Option<u32> {
         }
         i += 1;
     }
-    max
+    out
 }
 
 #[cfg(test)]
@@ -203,7 +217,13 @@ mod tests {
     fn ord_at(src: &str) -> Option<u32> {
         let cursor = src.find('|').expect("test source needs a `|` cursor marker");
         let stripped = src.replace('|', "");
-        next_ordinal_at(&stripped, cursor)
+        suggest_ordinals_at(&stripped, cursor).first().copied()
+    }
+
+    fn ords_at(src: &str) -> Vec<u32> {
+        let cursor = src.find('|').expect("test source needs a `|` cursor marker");
+        let stripped = src.replace('|', "");
+        suggest_ordinals_at(&stripped, cursor)
     }
 
     #[test]
@@ -245,6 +265,13 @@ mod tests {
     #[test]
     fn outside_struct_returns_none() {
         assert_eq!(ord_at("@|"), None);
+    }
+
+    #[test]
+    fn gaps_offered_before_next() {
+        // existing: 0,2,3,5 — gaps are 1 and 4, plus 6 at end.
+        let src = "struct S {\n  a @0 :Text;\n  c @2 :Text;\n  d @3 :Text;\n  e @5 :Text;\n  f @|";
+        assert_eq!(ords_at(src), vec![1, 4, 6]);
     }
 
     #[test]

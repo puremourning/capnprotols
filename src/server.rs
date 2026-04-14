@@ -572,18 +572,31 @@ impl LanguageServer for Backend {
                 }
             }
             CursorContext::FieldOrdinal => {
-                // If we're inside a struct's field list, suggest the next ordinal.
-                // Otherwise (top-level file id, or right after `struct Foo `, `enum Bar `,
-                // `annotation pii `, etc.) generate a fresh capnp ID via `capnp id`.
-                if let Some(next) = ordinals::next_ordinal_at(&text, byte) {
-                    return Ok(Some(CompletionResponse::Array(vec![CompletionItem {
-                        label: next.to_string(),
-                        kind: Some(CompletionItemKind::VALUE),
-                        detail: Some("next field ordinal".to_string()),
-                        sort_text: Some(format!("0000_{:08}", next)),
-                        preselect: Some(true),
-                        ..Default::default()
-                    }])));
+                // Inside a struct/enum's body: offer every valid ordinal — gaps in the
+                // existing sequence first (handy when a field was deleted earlier), then
+                // the next-after-max. Outside any struct/enum: generate a fresh capnp ID.
+                let candidates = ordinals::suggest_ordinals_at(&text, byte);
+                if !candidates.is_empty() {
+                    let items: Vec<CompletionItem> = candidates
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, n)| CompletionItem {
+                            label: n.to_string(),
+                            kind: Some(CompletionItemKind::VALUE),
+                            detail: Some(if rank == 0 && candidates.len() > 1 {
+                                "next available ordinal (fills a gap)".to_string()
+                            } else if rank == 0 {
+                                "next field ordinal".to_string()
+                            } else {
+                                format!("valid ordinal (rank {})", rank + 1)
+                            }),
+                            // sort_text keeps our order: 0000_{rank} so the first is preselected.
+                            sort_text: Some(format!("{:04}_{:08}", rank, n)),
+                            preselect: Some(rank == 0),
+                            ..Default::default()
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
                 }
                 // Top-level / declaration site: generate a unique capnp ID.
                 let config = self.config.read().await.clone();

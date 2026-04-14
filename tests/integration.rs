@@ -270,15 +270,35 @@ fn completion_field_ordinal_sequence() {
     std::fs::write("/tmp/capnprotols-test-ord.capnp", text).unwrap();
     c.open(&uri, text);
 
-    // Cursor right after the `@` on the `baz` line.
     let r = c.request(
         "textDocument/completion",
         json!({ "textDocument": { "uri": uri }, "position": pos(4, 7) }),
     );
     let items = r["result"].as_array().expect("items");
+    // Dense sequence (0, 1) -> only one candidate: the next-after-max.
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["label"], "2");
     assert_eq!(items[0]["detail"], "next field ordinal");
+    c.shutdown();
+}
+
+#[test]
+fn completion_field_ordinal_offers_gaps_first() {
+    let mut c = LspClient::start();
+    let uri = "file:///tmp/capnprotols-test-ord-gap.capnp".to_string();
+    // Ordinals present: 0, 2, 3, 5. Gaps: 1, 4. Next: 6.
+    let text = "@0xeaf06436acd04fca;\nstruct A {\n  a @0 :Text;\n  c @2 :Text;\n  d @3 :Text;\n  e @5 :Text;\n  f @\n}\n";
+    std::fs::write("/tmp/capnprotols-test-ord-gap.capnp", text).unwrap();
+    c.open(&uri, text);
+
+    let r = c.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": pos(6, 5) }),
+    );
+    let items = r["result"].as_array().expect("items");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["1", "4", "6"], "got {labels:?}");
+    assert_eq!(items[0]["preselect"], true);
     c.shutdown();
 }
 
