@@ -5,6 +5,9 @@ Speaks LSP over stdio. Wraps the official `capnp` compiler for authoritative
 diagnostics and symbol resolution, and uses [tree-sitter-capnp](https://github.com/amaanq/tree-sitter-capnp)
 for editor-resilient highlighting.
 
+WARNING: This repository is 100% AI generated code and was intentionally done
+hackily and quickly to deliver value. It therefore should not be relied on.
+
 ## Features
 
 - **Diagnostics** — parse and schema errors from `capnp compile`, mapped to LSP
