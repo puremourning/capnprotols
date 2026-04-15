@@ -245,7 +245,7 @@ fn walk(node: tree_sitter::Node<'_>, src: &str, bytes: &[u8], out: &mut Vec<Tok>
     // whitespace between those would corrupt the literal.
     if matches!(
         node.kind(),
-        "string" | "concatenated_string" | "import_path" | "data_string" | "block_text"
+        "string" | "concatenated_string" | "import_path" | "namespace" | "data_string" | "block_text"
     ) {
         let range = node.byte_range();
         let text = src[range.clone()].to_string();
@@ -926,6 +926,22 @@ mod tests {
         assert!(out.contains("     bar @1:UInt8;\n"), "lost ugly bar:\n{out}");
         // Outside the off-region, normal formatting applies.
         assert!(out.contains("\n  baz @2 :Bool;\n"), "baz wasn't normalised:\n{out}");
+    }
+
+    #[test]
+    fn top_level_annotation_string_preserved() {
+        // Top-level annotations like `$namespace("capnp")` must not get spaces
+        // inserted inside the string literal.
+        let src = "@0xeaf06436acd04fe6;\n$namespace(\"capnp::annotations\");\n";
+
+        let out = fmt(src).expect("formatted");
+        assert!(
+            out.contains("$namespace(\"capnp::annotations\");"),
+            "string literal corrupted:\n{out}"
+        );
+        // Idempotency: formatting twice should produce same result.
+        let out2 = fmt(&out).expect("formatted second pass");
+        assert_eq!(out, out2, "not idempotent:\npass1: {out}\npass2: {out2}");
     }
 
     #[test]

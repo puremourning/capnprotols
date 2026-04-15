@@ -7,6 +7,8 @@
 
 mod common;
 
+use std::process::Command;
+
 use serde_json::{json, Value};
 
 use crate::common::{LspClient, TempProject};
@@ -617,4 +619,172 @@ fn live_buffer_changes_visible_to_hover() {
     let value = r["result"]["contents"]["value"].as_str().unwrap();
     assert!(value.contains("ADDED LIVE"), "live edit not reflected: {value}");
     c.shutdown();
+}
+
+/// Apply LSP text edits (sorted by range) to a document string, producing the formatted result.
+fn apply_edits(text: &str, edits: &[Value]) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut result = String::new();
+    let mut cur_line: usize = 0;
+
+    // LSP edits from the formatter are line-granularity replacements, sorted by range.
+    for edit in edits {
+        let start_line = edit["range"]["start"]["line"].as_u64().unwrap() as usize;
+        let start_char = edit["range"]["start"]["character"].as_u64().unwrap() as usize;
+        let end_line = edit["range"]["end"]["line"].as_u64().unwrap() as usize;
+        let end_char = edit["range"]["end"]["character"].as_u64().unwrap() as usize;
+        let new_text = edit["newText"].as_str().unwrap();
+
+        // Copy unchanged lines before this edit.
+        while cur_line < start_line {
+            result.push_str(lines[cur_line]);
+            result.push('\n');
+            cur_line += 1;
+        }
+
+        // Partial start line (chars before start_char).
+        if cur_line < lines.len() {
+            let line = lines[cur_line];
+            let byte_start = line
+                .char_indices()
+                .nth(start_char)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            result.push_str(&line[..byte_start]);
+        }
+
+        // Insert replacement text.
+        result.push_str(new_text);
+
+        // Skip over replaced lines.
+        if end_line < lines.len() {
+            let end_line_text = lines[end_line];
+            let byte_end = end_line_text
+                .char_indices()
+                .nth(end_char)
+                .map(|(i, _)| i)
+                .unwrap_or(end_line_text.len());
+            result.push_str(&end_line_text[byte_end..]);
+            result.push('\n');
+            cur_line = end_line + 1;
+        } else {
+            cur_line = lines.len();
+        }
+    }
+
+    // Copy remaining lines.
+    while cur_line < lines.len() {
+        result.push_str(lines[cur_line]);
+        result.push('\n');
+        cur_line += 1;
+    }
+    result
+}
+
+/// Upstream capnproto schema files copied into tests/fixtures/upstream-*.capnp.
+/// These cover annotations, generics, interfaces, enums, and large nested schemas.
+const UPSTREAM_FIXTURES: &[&str] = &[
+    "upstream-c++.capnp",
+    "upstream-persistent.capnp",
+    "upstream-schema.capnp",
+    "upstream-stream.capnp",
+    "upstream-addressbook.capnp",
+];
+
+#[test]
+fn formatting_upstream_schemas_produces_valid_output() {
+    let proj = TempProject::with_fixtures(UPSTREAM_FIXTURES);
+    let mut c = LspClient::start();
+    let mut failures: Vec<String> = Vec::new();
+
+    for &name in UPSTREAM_FIXTURES {
+        let text = proj.text(name);
+        let path = proj.path(name);
+        let uri = proj.uri(name);
+        c.open(&uri, &text);
+
+        let r = c.request(
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 2, "insertSpaces": true },
+            }),
+        );
+
+        let formatted = if let Some(edits) = r["result"].as_array() {
+            if edits.is_empty() {
+                text.clone()
+            } else {
+                apply_edits(&text, edits)
+            }
+        } else {
+            failures.push(format!("{name}: formatter returned null (parse error)"));
+            continue;
+        };
+
+        if !validate_capnp(&formatted, &path) {
+            failures.push(format!(
+                "{name}: formatted output fails capnp compile",
+            ));
+        }
+
+        // Idempotency: formatting again should produce no edits.
+        c.change(&uri, 2, &formatted);
+        let r2 = c.request(
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": uri },
+                "options": { "tabSize": 2, "insertSpaces": true },
+            }),
+        );
+        if let Some(edits2) = r2["result"].as_array() {
+            if !edits2.is_empty() {
+                let re_formatted = apply_edits(&formatted, edits2);
+                let diff: String = formatted
+                    .lines()
+                    .zip(re_formatted.lines())
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .map(|(i, (a, b))| format!("  line {i}:\n    pass1: {a:?}\n    pass2: {b:?}"))
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                failures.push(format!("{name}: formatting is not idempotent\n{diff}"));
+            }
+        }
+    }
+
+    c.shutdown();
+
+    if !failures.is_empty() {
+        panic!(
+            "{} formatting failure(s):\n\n{}",
+            failures.len(),
+            failures.join("\n\n---\n\n")
+        );
+    }
+}
+
+/// Write text to a temp file alongside the original and run `capnp compile -o-` to validate it.
+fn validate_capnp(text: &str, original_path: &std::path::Path) -> bool {
+    let dir = original_path.parent().unwrap();
+    let tmp = dir.join("__capnprotols_format_check__.capnp");
+    std::fs::write(&tmp, text).expect("write temp file");
+
+    let output = Command::new("capnp")
+        .arg("compile")
+        .arg("-o-")
+        .arg(&tmp)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("failed to run capnp compile");
+
+    let _ = std::fs::remove_file(&tmp);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("  capnp compile failed for {}:\n{}", original_path.display(), stderr);
+    }
+    output.status.success()
 }
