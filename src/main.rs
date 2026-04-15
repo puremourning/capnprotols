@@ -2,15 +2,17 @@ use tower_lsp::{LspService, Server};
 
 mod aliases;
 mod compiler;
-mod config;
 mod diagnostics;
 mod document;
-mod format;
 mod index;
 mod ordinals;
 mod schema_capnp;
 mod semantic_tokens;
 mod server;
+
+// Re-export from lib crate so binary-local modules can use `crate::config` / `crate::format`.
+pub use capnprotols::config;
+pub use capnprotols::format;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {

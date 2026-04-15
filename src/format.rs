@@ -377,9 +377,10 @@ fn separator(
   // the line would otherwise fit. Mirrors clang-format's "preserve user newlines"
   // philosophy.
   if tok.newline_before {
-    if t == "$" {
+    if t == "$" && !matches!(p, ";" | "}") {
       // Annotation-chain continuation: hang one indent level beneath the current
-      // statement depth.
+      // statement depth. After `;` or `}` the `$` starts a new top-level
+      // annotation statement, so the normal post-statement rule handles it.
       return Sep::Newline {
         blank: tok.blank_line_before,
         indent: depth * INDENT_UNIT + INDENT_UNIT,
@@ -615,7 +616,7 @@ fn wrap_annotation_chain(line: &str, _max: usize) -> Option<Vec<String>> {
 /// Break a long generic instantiation inside the outermost `(...)`:
 ///   `field @0 :List(VeryLong, Other);`
 /// becomes
-///   ```
+///   ```text
 ///   field @0 :List(
 ///     VeryLong,
 ///     Other);
@@ -937,6 +938,26 @@ mod tests {
         .contains("\n  foo @0 :Text;\n  # this is a long inline comment"),
       "comment not relocated:\n{}",
       out.text
+    );
+  }
+
+  #[test]
+  fn top_level_annotation_not_indented_after_semicolon() {
+    let src = "@0xeaf06436acd04fe7;\n$namespace(\"test\");\n";
+    let out = fmt(src).expect("formatted");
+    assert!(
+      out.contains("\n$namespace(\"test\");\n"),
+      "top-level annotation wrongly indented:\n{out}"
+    );
+  }
+
+  #[test]
+  fn top_level_annotation_not_indented_after_closing_brace() {
+    let src = "@0xeaf06436acd04fe8;\nstruct Foo {\n  x @0 :Text;\n}\n\n$namespace(\"test\");\n";
+    let out = fmt(src).expect("formatted");
+    assert!(
+      out.contains("\n$namespace(\"test\");\n"),
+      "top-level annotation wrongly indented after }}:\n{out}"
     );
   }
 

@@ -5,9 +5,19 @@ edition = "2021"
 description = "Language server for Cap'n Proto schema files"
 license = "MIT"
 
+default-run = "capnprotols"
+
+[lib]
+name = "capnprotols"
+path = "src/lib.rs"
+
 [[bin]]
 name = "capnprotols"
 path = "src/main.rs"
+
+[[bin]]
+name = "capnpfmt"
+path = "src/capnpfmt.rs"
 
 [dependencies]
 tower-lsp = "0.20"
