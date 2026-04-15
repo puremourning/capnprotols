@@ -71,8 +71,33 @@ Or install it onto `$PATH` (under `~/.cargo/bin/`):
 
 ```sh
 cargo install --path .
-# binary at ~/.cargo/bin/capnprotols
+# installs both ~/.cargo/bin/capnprotols and ~/.cargo/bin/capnpfmt
 ```
+
+## capnpfmt
+
+A standalone formatter for `.capnp` schema files. Installed alongside the
+language server.
+
+```sh
+# Format a file in place
+capnpfmt schema.capnp
+
+# Format multiple files
+capnpfmt *.capnp
+
+# Read stdin, write formatted output to stdout
+capnpfmt < schema.capnp > formatted.capnp
+
+# Check mode — exit 1 if any file isn't formatted (useful in CI)
+capnpfmt --check *.capnp
+
+# Custom column limit (default: 100)
+capnpfmt --width 80 schema.capnp
+```
+
+Bails on parse errors (leaves the file unchanged) so it's safe to run on
+save or in pre-commit hooks.
 
 ## Configuration
 
