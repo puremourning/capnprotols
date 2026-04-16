@@ -393,6 +393,21 @@ impl Index {
     })
   }
 
+  /// Candidates declared directly inside another node (for `Parent.<cursor>` completion
+  /// where `Parent` is a local struct/interface/enum). Matches children by `scope_id`
+  /// and filters to named declarations worth offering.
+  pub fn nested_candidates(&self, parent_id: u64) -> Vec<&NodeInfo> {
+    self
+      .nodes
+      .values()
+      .filter(|n| {
+        n.scope_id == parent_id
+          && !n.short_name.is_empty()
+          && !matches!(n.kind, NodeKind::File | NodeKind::Other)
+      })
+      .collect()
+  }
+
   /// Candidates declared inside a particular file (for `Namespace.<cursor>` completion).
   pub fn candidates_in_file(&self, file: &Path) -> Vec<&NodeInfo> {
     self

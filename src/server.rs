@@ -645,7 +645,15 @@ impl LanguageServer for Backend {
       CursorContext::Type => index.type_candidates().collect(),
       CursorContext::Annotation => index.annotation_candidates().collect(),
       CursorContext::Member { namespace } => {
-        if let Some(import_path) = aliases::import_path_for(&text, namespace) {
+        // First try: `namespace` is a local named node (struct/interface/enum) whose
+        // nested children we should offer — e.g. `Service.` -> `Kind`.
+        let nested: Vec<&NodeInfo> = index
+          .find_node_by_short_name(namespace, &path)
+          .map(|p| index.nested_candidates(p.id))
+          .unwrap_or_default();
+        if !nested.is_empty() {
+          nested
+        } else if let Some(import_path) = aliases::import_path_for(&text, namespace) {
           let config = self.config.read().await.clone();
           let reported =
             std::path::PathBuf::from(import_path.trim_start_matches('/'));
