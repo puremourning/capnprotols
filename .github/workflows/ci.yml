@@ -20,11 +20,7 @@ jobs:
         rust: [stable, beta, "1.81.0"]
     steps:
       - uses: actions/checkout@v5
-      - name: Install Cap'n Proto
-        run: |
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update
-          sudo apt-get install -y capnproto libcapnp-dev
+      - uses: ./.github/actions/setup-capnproto
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -48,11 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Cap'n Proto
-        run: |
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update
-          sudo apt-get install -y capnproto libcapnp-dev
+      - uses: ./.github/actions/setup-capnproto
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
