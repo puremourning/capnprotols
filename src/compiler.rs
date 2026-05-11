@@ -11,9 +11,9 @@ use crate::config::Config;
 #[allow(dead_code)]
 pub struct CompileOutput {
   /// CodeGeneratorRequest bytes from stdout (empty on hard failure).
-  pub cgr: Vec<u8>,
-  pub stderr: String,
-  pub success: bool,
+  pub cgr:          Vec<u8>,
+  pub stderr:       String,
+  pub success:      bool,
   /// When the compile ran against an overlay file (live unsaved buffer), this is the
   /// overlay's on-disk path. Use it to remap the CGR's compiler-reported paths back to
   /// the real file path before exposing them to LSP clients.

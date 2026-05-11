@@ -8,9 +8,9 @@ use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct UsingAlias {
-  pub name: String,
+  pub name:            String,
   pub name_start_byte: usize,
-  pub name_end_byte: usize,
+  pub name_end_byte:   usize,
 }
 
 fn re() -> &'static Regex {
@@ -48,9 +48,9 @@ pub fn scan(src: &str) -> Vec<UsingAlias> {
     .filter_map(|c| {
       let m = c.get(1)?;
       Some(UsingAlias {
-        name: m.as_str().to_string(),
+        name:            m.as_str().to_string(),
         name_start_byte: m.start(),
-        name_end_byte: m.end(),
+        name_end_byte:   m.end(),
       })
     })
     .collect()
@@ -69,8 +69,8 @@ pub fn find<'a>(
 /// compiled).
 #[derive(Debug, Clone)]
 pub struct TopLevelDecl {
-  pub kind: DeclKind,
-  pub name: String,
+  pub kind:        DeclKind,
+  pub name:        String,
   pub doc_comment: Option<String>,
 }
 

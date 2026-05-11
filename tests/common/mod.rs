@@ -12,9 +12,9 @@ use serde_json::{json, Value};
 
 /// Convenient handle on a running language server that we can drive from tests.
 pub struct LspClient {
-  child: Option<Child>,
-  stdin: ChildStdin,
-  rx: Receiver<Value>,
+  child:   Option<Child>,
+  stdin:   ChildStdin,
+  rx:      Receiver<Value>,
   next_id: i64,
 }
 

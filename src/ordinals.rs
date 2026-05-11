@@ -25,7 +25,7 @@ enum BlockKind {
 struct OpenBrace {
   /// Byte index of the `{` itself.
   brace_byte: usize,
-  kind: BlockKind,
+  kind:       BlockKind,
 }
 
 /// Suggest valid ordinal values at `cursor` in ascending order: first any gaps in the
@@ -92,7 +92,7 @@ fn enclosing_struct_or_enum(text: &str, cursor: usize) -> Option<OpenBrace> {
     if b == b'{' {
       stack.push(OpenBrace {
         brace_byte: i,
-        kind: classify_block(text, i),
+        kind:       classify_block(text, i),
       });
     } else if b == b'}' {
       stack.pop();

@@ -3,13 +3,16 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use ropey::Rope;
 use tower_lsp::lsp_types::{
-  Position, Range, TextDocumentContentChangeEvent, Url,
+  Position,
+  Range,
+  TextDocumentContentChangeEvent,
+  Url,
 };
 
 #[derive(Debug, Clone)]
 pub struct Document {
   pub version: i32,
-  pub rope: Rope,
+  pub rope:    Rope,
 }
 
 impl Document {

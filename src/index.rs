@@ -20,25 +20,25 @@ pub enum NodeKind {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // id/scope_id will be needed for cross-file resolution
 pub struct NodeInfo {
-  pub id: u64,
-  pub display_name: String,
+  pub id:                    u64,
+  pub display_name:          String,
   /// Last component of `display_name` after the file `:` separator. For top-level types
   /// this is just the type name; for the file node itself this is empty.
-  pub short_name: String,
-  pub kind: NodeKind,
+  pub short_name:            String,
+  pub kind:                  NodeKind,
   /// File path the compiler reported the node lives in (extracted from displayName prefix).
-  pub file: PathBuf,
+  pub file:                  PathBuf,
   /// Byte range of the node's *declaration* in `file`. Zero when the compiler had no info.
-  pub start_byte: u32,
-  pub end_byte: u32,
-  pub scope_id: u64,
-  pub doc_comment: Option<String>,
+  pub start_byte:            u32,
+  pub end_byte:              u32,
+  pub scope_id:              u64,
+  pub doc_comment:           Option<String>,
   /// For generic structs/interfaces (e.g. `struct Foo(T, U)`), the parameter names.
   /// Empty for non-generic types.
-  pub parameters: Vec<String>,
+  pub parameters:            Vec<String>,
   /// For struct nodes, the immediate (non-group) named fields with their rendered types.
   /// Empty for non-structs.
-  pub fields: Vec<FieldInfo>,
+  pub fields:                Vec<FieldInfo>,
   /// For annotation nodes, the typeId of the value type (typically a struct whose fields
   /// are the named arguments at the application site).
   pub annotation_value_type: Option<u64>,
@@ -46,7 +46,7 @@ pub struct NodeInfo {
 
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
-  pub name: String,
+  pub name:     String,
   /// Rendered type string, e.g. `:Text`, `:UInt32`, `:List(Foo)`. Empty for groups
   /// (which we don't render).
   pub type_str: String,
@@ -54,8 +54,8 @@ pub struct FieldInfo {
 
 #[derive(Debug, Clone, Copy)]
 pub struct IdentRef {
-  pub start_byte: u32,
-  pub end_byte: u32,
+  pub start_byte:     u32,
+  pub end_byte:       u32,
   /// Node id this identifier resolves to, or 0 for a member ref we can't follow yet.
   pub target_node_id: u64,
 }
@@ -66,7 +66,7 @@ pub struct FileIndex {
   pub identifiers: Vec<IdentRef>,
   /// Imports declared in this file: typeId of the imported file -> petname (the path
   /// string as written in the source `import "..."`).
-  pub imports: HashMap<u64, String>,
+  pub imports:     HashMap<u64, String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -203,8 +203,8 @@ impl Index {
                         _ => 0,
                     };
           idents.push(IdentRef {
-            start_byte: ident.get_start_byte(),
-            end_byte: ident.get_end_byte(),
+            start_byte:     ident.get_start_byte(),
+            end_byte:       ident.get_end_byte(),
             target_node_id: target,
           });
         }

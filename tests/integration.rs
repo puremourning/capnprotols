@@ -182,7 +182,7 @@ fn goto_definition_falls_back_for_nested_type_in_generic() {
   assert!(result.is_object(), "expected definition, got {r}");
   let target = result["uri"].as_str().unwrap();
   assert!(target.ends_with("/user.capnp"), "got {target}");
-  let target_text = std::fs::read_to_string(&proj.path("user.capnp")).unwrap();
+  let target_text = std::fs::read_to_string(proj.path("user.capnp")).unwrap();
   let target_line = result["range"]["start"]["line"].as_u64().unwrap() as usize;
   let decl = target_text.lines().nth(target_line).unwrap_or("");
   assert!(
@@ -212,7 +212,7 @@ fn goto_definition_for_self_nested_in_generic() {
   let result = &r["result"];
   assert!(result.is_object(), "expected definition, got {r}");
   let target_line = result["range"]["start"]["line"].as_u64().unwrap() as usize;
-  let target_text = std::fs::read_to_string(&proj.path("user.capnp")).unwrap();
+  let target_text = std::fs::read_to_string(proj.path("user.capnp")).unwrap();
   let decl = target_text.lines().nth(target_line).unwrap_or("");
   assert!(
     decl.contains("struct SamlIdentity"),
@@ -332,36 +332,44 @@ fn completion_after_dollar_only_annotations() {
 
 #[test]
 fn completion_dotted_namespace_of_local_struct_offers_nested_children() {
-    // Reported: `:Service.` should suggest only `Kind` (the nested enum), not every
-    // type in the index. Local struct/interface namespace resolution.
-    let mut c = LspClient::start();
-    let proj = TempProject::with_fixtures(&[]);
-    let path = proj.path("svc.capnp");
-    // First open a valid version so the CGR populates the index, then simulate the
-    // user typing `Service.` (which leaves the buffer temporarily unparseable — the
-    // cached-index-on-failure behaviour keeps completion working).
-    let valid = "@0xeaf06436acd04fe6;\nstruct Service {\n  enum Kind {\n    orderbook @0;\n    user @1;\n  }\n  name @0 :Text;\n  kind @1 :Kind;\n}\n\nstruct ShardTable {\n  kind @0 :Service.Kind;\n}\n";
-    std::fs::write(&path, valid).unwrap();
-    let uri = format!("file://{}", path.display());
-    c.open(&uri, valid);
+  // Reported: `:Service.` should suggest only `Kind` (the nested enum), not every
+  // type in the index. Local struct/interface namespace resolution.
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&[]);
+  let path = proj.path("svc.capnp");
+  // First open a valid version so the CGR populates the index, then simulate the
+  // user typing `Service.` (which leaves the buffer temporarily unparseable — the
+  // cached-index-on-failure behaviour keeps completion working).
+  let valid = "@0xeaf06436acd04fe6;\nstruct Service {\n  enum Kind {\n    orderbook @0;\n    user @1;\n  }\n  name @0 :Text;\n  kind @1 :Kind;\n}\n\nstruct ShardTable {\n  kind @0 :Service.Kind;\n}\n";
+  std::fs::write(&path, valid).unwrap();
+  let uri = format!("file://{}", path.display());
+  c.open(&uri, valid);
 
-    let editing = valid.replace(":Service.Kind;", ":Service.;");
-    c.change(&uri, 2, &editing);
+  let editing = valid.replace(":Service.Kind;", ":Service.;");
+  c.change(&uri, 2, &editing);
 
-    let lines: Vec<&str> = editing.lines().collect();
-    let line = lines.iter().position(|l| l.contains(":Service.")).unwrap() as u32;
-    let col = (lines[line as usize].find(":Service.").unwrap() + ":Service.".len()) as u32;
-    let r = c.request(
-        "textDocument/completion",
-        json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
-    );
-    let items = r["result"].as_array().expect("items");
-    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-    assert!(labels.contains(&"Kind"), "missing Kind, got {labels:?}");
-    // Should NOT contain unrelated top-level types like ShardTable / Service itself.
-    assert!(!labels.contains(&"ShardTable"), "leaked unrelated type: {labels:?}");
-    assert!(!labels.contains(&"Service"), "leaked parent itself: {labels:?}");
-    c.shutdown();
+  let lines: Vec<&str> = editing.lines().collect();
+  let line = lines.iter().position(|l| l.contains(":Service.")).unwrap() as u32;
+  let col = (lines[line as usize].find(":Service.").unwrap()
+    + ":Service.".len()) as u32;
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  assert!(labels.contains(&"Kind"), "missing Kind, got {labels:?}");
+  // Should NOT contain unrelated top-level types like ShardTable / Service itself.
+  assert!(
+    !labels.contains(&"ShardTable"),
+    "leaked unrelated type: {labels:?}"
+  );
+  assert!(
+    !labels.contains(&"Service"),
+    "leaked parent itself: {labels:?}"
+  );
+  c.shutdown();
 }
 
 #[test]

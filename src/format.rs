@@ -32,7 +32,7 @@ const INDENT_UNIT: usize = 2;
 #[allow(dead_code)]
 pub struct LongLineWarning {
   /// 0-based line in the *formatted* output.
-  pub line: u32,
+  pub line:  u32,
   /// Width (in chars) of the offending line.
   pub width: u32,
 }
@@ -40,7 +40,7 @@ pub struct LongLineWarning {
 /// Formatter result: the new text plus any unwrappable long-line warnings.
 #[derive(Debug)]
 pub struct FormatOutput {
-  pub text: String,
+  pub text:     String,
   pub warnings: Vec<LongLineWarning>,
 }
 
@@ -60,7 +60,7 @@ pub fn format_document(
   let tokens = collect_leaves(root, text);
   if tokens.is_empty() {
     return Some(FormatOutput {
-      text: text.to_string(),
+      text:     text.to_string(),
       warnings: Vec::new(),
     });
   }
@@ -211,15 +211,15 @@ struct Tok {
   /// The leaf node's `kind()`. For anonymous tokens this equals the literal text
   /// (e.g. `";"`); for named atomic nodes it's the kind name (`"comment"`,
   /// `"field_identifier"`, …).
-  kind: String,
+  kind:              String,
   /// Raw source text covered by the leaf, copied verbatim.
-  text: String,
+  text:              String,
   /// Source byte range of the leaf — used to identify `# capnpfmt: off` regions.
-  byte_start: usize,
-  byte_end: usize,
+  byte_start:        usize,
+  byte_end:          usize,
   /// Whether the token sits at the very start of its source line (no non-whitespace
   /// chars before it on that line). Used to preserve "comment is on its own line".
-  starts_line: bool,
+  starts_line:       bool,
   /// True if the source had at least one blank line immediately before this token —
   /// i.e. between the prior token and this one, two or more `\n` separated only by
   /// whitespace. Lets us preserve user-intentional vertical grouping.
@@ -228,7 +228,7 @@ struct Tok {
   /// (not necessarily blank). Used as a clang-format-style "soft break hint": when
   /// the user manually broke an annotation chain or generic arg list across lines,
   /// we keep it broken even when it would otherwise fit on one line.
-  newline_before: bool,
+  newline_before:    bool,
 }
 
 fn collect_leaves(root: tree_sitter::Node<'_>, src: &str) -> Vec<Tok> {
@@ -361,7 +361,7 @@ fn separator(
   let prev = match prev {
     None => {
       return Sep::Newline {
-        blank: false,
+        blank:  false,
         indent: depth * INDENT_UNIT,
       }
     }
@@ -382,7 +382,7 @@ fn separator(
       // statement depth. After `;` or `}` the `$` starts a new top-level
       // annotation statement, so the normal post-statement rule handles it.
       return Sep::Newline {
-        blank: tok.blank_line_before,
+        blank:  tok.blank_line_before,
         indent: depth * INDENT_UNIT + INDENT_UNIT,
       };
     }
@@ -394,7 +394,7 @@ fn separator(
         .map(|a| a + INDENT_UNIT)
         .unwrap_or(depth * INDENT_UNIT + INDENT_UNIT);
       return Sep::Newline {
-        blank: false,
+        blank:  false,
         indent: cont,
       };
     }
@@ -405,7 +405,7 @@ fn separator(
   if tok.kind == "comment" {
     if tok.starts_line {
       return Sep::Newline {
-        blank: tok.blank_line_before,
+        blank:  tok.blank_line_before,
         indent: depth * INDENT_UNIT,
       };
     }
@@ -413,7 +413,7 @@ fn separator(
   }
   if prev.kind == "comment" {
     return Sep::Newline {
-      blank: tok.blank_line_before,
+      blank:  tok.blank_line_before,
       indent: depth * INDENT_UNIT,
     };
   }
@@ -427,7 +427,7 @@ fn separator(
   // had one in the source — we don't auto-insert blanks (that decision is theirs).
   if matches!(p, ";" | "{" | "}") {
     return Sep::Newline {
-      blank: tok.blank_line_before,
+      blank:  tok.blank_line_before,
       indent: depth * INDENT_UNIT,
     };
   }
@@ -508,7 +508,7 @@ fn enforce_width(
     for l in &chunks {
       if l.chars().count() > max && opts.warn_long_lines {
         warnings.push(LongLineWarning {
-          line: (out_lines.len()
+          line:  (out_lines.len()
             + chunks.iter().position(|x| x == l).unwrap_or(0))
             as u32,
           width: l.chars().count() as u32,

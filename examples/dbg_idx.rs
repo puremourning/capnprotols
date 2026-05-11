@@ -1,3 +1,7 @@
+// This debug example re-includes src/index.rs via `#[path]`, so from this
+// compilation unit's perspective much of the index API is unused.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::process::Command;
 

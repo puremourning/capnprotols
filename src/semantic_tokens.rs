@@ -8,7 +8,9 @@ use std::sync::OnceLock;
 
 use ropey::Rope;
 use tower_lsp::lsp_types::{
-  SemanticToken, SemanticTokenModifier, SemanticTokenType,
+  SemanticToken,
+  SemanticTokenModifier,
+  SemanticTokenType,
 };
 use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
@@ -117,11 +119,11 @@ pub fn full(text: &str) -> Vec<SemanticToken> {
   // Collect (start_line, start_col, length, ty_idx, mod_bitmask) absolute, then delta-encode.
   #[derive(Debug)]
   struct Tok {
-    line: u32,
-    col: u32,
-    len: u32,
-    ty: u32,
-    modifiers: u32,
+    line:        u32,
+    col:         u32,
+    len:         u32,
+    ty:          u32,
+    modifiers:   u32,
     // Used to deduplicate when multiple captures cover the same range — prefer the
     // most-specific (longest capture-name string) to mimic tree-sitter's own ordering.
     specificity: usize,

@@ -9,19 +9,15 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info, warn};
 
-use crate::aliases;
-use crate::compiler;
 use crate::config::{Config, InitOptions};
-use crate::diagnostics;
 use crate::document::DocumentStore;
 use crate::index::{Index, NodeInfo, NodeKind};
-use crate::ordinals;
-use crate::semantic_tokens;
+use crate::{aliases, compiler, diagnostics, ordinals, semantic_tokens};
 
 pub struct Backend {
-  client: Client,
-  docs: DocumentStore,
-  config: Arc<RwLock<Config>>,
+  client:  Client,
+  docs:    DocumentStore,
+  config:  Arc<RwLock<Config>>,
   /// Per-file symbol index, keyed by the file's URI.
   indices: Arc<DashMap<Url, Arc<Index>>>,
 }
@@ -73,10 +69,10 @@ impl Backend {
     // up in the CGR, only the import petname is available.
     let receiver_file: PathBuf = match index.node(recv_ident.target_node_id) {
       Some(n) if n.kind == NodeKind::File => n.file.clone(),
-      _ => match index.import_petname(path, recv_ident.target_node_id) {
-        Some(name) => PathBuf::from(name.trim_start_matches('/')),
-        None => return None,
-      },
+      _ => {
+        let name = index.import_petname(path, recv_ident.target_node_id)?;
+        PathBuf::from(name.trim_start_matches('/'))
+      }
     };
     let target_path =
       resolve_target_file(&receiver_file, path, &config.resolution_roots);
@@ -88,7 +84,7 @@ impl Backend {
     let start = byte_to_position(&target_rope, alias.name_start_byte);
     let end = byte_to_position(&target_rope, alias.name_end_byte);
     Some(Location {
-      uri: target_uri,
+      uri:   target_uri,
       range: Range { start, end },
     })
   }
@@ -196,8 +192,8 @@ impl LanguageServer for Backend {
             cfg.resolution_roots,
         );
     Ok(InitializeResult {
-      server_info: Some(ServerInfo {
-        name: "capnprotols".to_string(),
+      server_info:  Some(ServerInfo {
+        name:    "capnprotols".to_string(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
       }),
       capabilities: ServerCapabilities {
@@ -208,15 +204,18 @@ impl LanguageServer for Backend {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
-          trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-          retrigger_characters: Some(vec![",".to_string()]),
+          trigger_characters:         Some(vec![
+            "(".to_string(),
+            ",".to_string(),
+          ]),
+          retrigger_characters:       Some(vec![",".to_string()]),
           work_done_progress_options: Default::default(),
         }),
         semantic_tokens_provider: Some(
           SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
               legend: SemanticTokensLegend {
-                token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
+                token_types:     semantic_tokens::TOKEN_TYPES.to_vec(),
                 token_modifiers: semantic_tokens::TOKEN_MODIFIERS.to_vec(),
               },
               full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -316,7 +315,7 @@ impl LanguageServer for Backend {
       if target_path.exists() {
         if let Ok(target_uri) = Url::from_file_path(&target_path) {
           return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
+            uri:   target_uri,
             range: Range::default(),
           })));
         }
@@ -410,7 +409,7 @@ impl LanguageServer for Backend {
       )
     });
     Ok(Some(GotoDefinitionResponse::Scalar(Location {
-      uri: target_uri,
+      uri:   target_uri,
       range: Range { start, end },
     })))
   }
@@ -471,12 +470,12 @@ impl LanguageServer for Backend {
     //      struct/interface -> use its generic parameters.
     let signature = if call.callee == "List" {
       Some(SignatureInformation {
-        label: "List(T)".into(),
-        documentation: Some(Documentation::String(
+        label:            "List(T)".into(),
+        documentation:    Some(Documentation::String(
           "List of T. Element type follows.".into(),
         )),
-        parameters: Some(vec![ParameterInformation {
-          label: ParameterLabel::Simple("T".into()),
+        parameters:       Some(vec![ParameterInformation {
+          label:         ParameterLabel::Simple("T".into()),
           documentation: None,
         }]),
         active_parameter: Some(0),
@@ -523,7 +522,7 @@ impl LanguageServer for Backend {
     let active = call.active_parameter.min(n.saturating_sub(1));
     signature.active_parameter = Some(active);
     Ok(Some(SignatureHelp {
-      signatures: vec![signature],
+      signatures:       vec![signature],
       active_signature: Some(0),
       active_parameter: Some(active),
     }))
@@ -567,18 +566,18 @@ impl LanguageServer for Backend {
     // Resolve to a node via the smallest containing FSI ident, then prefer the
     // member-component (longest containing ident ending at the cursor word) so that
     // for `Json.flatten` we hover the `flatten` annotation, not the `Json` file.
+    // Try longest-containing FSI ident first, then fall back to a name-based
+    // lookup (handles FSI misses like type parameters inside `List(T)`,
+    // preferring nodes declared in the current file).
     let node = index
-            .identifiers_at(&path, byte)
-            .into_iter()
-            .rev() // try longest first
-            .find_map(|i| index.node(i.target_node_id))
-            .or_else(|| {
-                // FSI miss (e.g. type parameter inside `List(T)`): fall back to looking
-                // up the cursor's identifier text in the index by name, preferring nodes
-                // declared in the current file.
-                let (_, _, word) = identifier_span_at_byte(&text, byte as usize)?;
-                index.find_node_by_short_name(word, &path)
-            });
+      .identifiers_at(&path, byte)
+      .into_iter()
+      .rev()
+      .find_map(|i| index.node(i.target_node_id))
+      .or_else(|| {
+        let (_, _, word) = identifier_span_at_byte(&text, byte as usize)?;
+        index.find_node_by_short_name(word, &path)
+      });
     let Some(node) = node else { return Ok(None) };
 
     let mut md = String::new();
@@ -604,10 +603,10 @@ impl LanguageServer for Backend {
     }
     Ok(Some(Hover {
       contents: HoverContents::Markup(MarkupContent {
-        kind: MarkupKind::Markdown,
+        kind:  MarkupKind::Markdown,
         value: md,
       }),
-      range: None,
+      range:    None,
     }))
   }
 
@@ -653,7 +652,9 @@ impl LanguageServer for Backend {
           .unwrap_or_default();
         if !nested.is_empty() {
           nested
-        } else if let Some(import_path) = aliases::import_path_for(&text, namespace) {
+        } else if let Some(import_path) =
+          aliases::import_path_for(&text, namespace)
+        {
           let config = self.config.read().await.clone();
           let reported =
             std::path::PathBuf::from(import_path.trim_start_matches('/'));
@@ -687,7 +688,7 @@ impl LanguageServer for Backend {
                   detail: Some(format!("from {}", target.display())),
                   documentation: d.doc_comment.map(|d| {
                     Documentation::MarkupContent(MarkupContent {
-                      kind: MarkupKind::Markdown,
+                      kind:  MarkupKind::Markdown,
                       value: d,
                     })
                   }),
@@ -763,7 +764,7 @@ impl LanguageServer for Backend {
       detail: Some(n.display_name.clone()),
       documentation: n.doc_comment.as_ref().map(|d| {
         Documentation::MarkupContent(MarkupContent {
-          kind: MarkupKind::Markdown,
+          kind:  MarkupKind::Markdown,
           value: d.clone(),
         })
       }),
@@ -840,7 +841,7 @@ fn resolve_target_file(
 /// the cursor. `callee` is the dotted name (e.g. `Json.discriminator`, `List`, or `Map`),
 /// `active_parameter` is the comma index of the cursor inside the parens.
 struct EnclosingCall {
-  callee: String,
+  callee:           String,
   active_parameter: u32,
 }
 
@@ -910,7 +911,7 @@ fn build_field_signature(
     label.push_str(&f.type_str);
     let end = label.len() as u32;
     params.push(ParameterInformation {
-      label: ParameterLabel::LabelOffsets([start, end]),
+      label:         ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -938,7 +939,7 @@ fn build_generic_signature(
     label.push_str(p);
     let end = label.len() as u32;
     out.push(ParameterInformation {
-      label: ParameterLabel::LabelOffsets([start, end]),
+      label:         ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -997,7 +998,7 @@ fn line_diff_edits(old: &str, new: &str) -> Vec<TextEdit> {
     edits.push(TextEdit {
       range: Range {
         start: Position::new(s, 0),
-        end: Position::new(end, 0),
+        end:   Position::new(end, 0),
       },
       new_text,
     });

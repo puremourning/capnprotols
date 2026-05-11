@@ -20,9 +20,9 @@ pub struct InitOptions {
 pub struct FormatOptions {
   /// Master switch. When false, formatting requests return no edits and we don't
   /// emit long-line warning diagnostics.
-  pub enabled: bool,
+  pub enabled:         bool,
   /// Hard column limit. Matches the KJ style guide default.
-  pub max_width: u32,
+  pub max_width:       u32,
   /// Publish a `WARNING` Diagnostic when a long line can't be auto-wrapped.
   pub warn_long_lines: bool,
 }
@@ -30,8 +30,8 @@ pub struct FormatOptions {
 impl Default for FormatOptions {
   fn default() -> Self {
     Self {
-      enabled: true,
-      max_width: 100,
+      enabled:         true,
+      max_width:       100,
       warn_long_lines: true,
     }
   }
@@ -39,14 +39,14 @@ impl Default for FormatOptions {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-  pub compiler_path: String,
-  pub import_paths: Vec<PathBuf>,
+  pub compiler_path:    String,
+  pub import_paths:     Vec<PathBuf>,
   /// Directories to consult when resolving a compiler-reported file path that doesn't
   /// exist on disk as-is (e.g. `capnp/compat/json.capnp` lives under the capnp install
   /// `include/` directory). Includes user-supplied import_paths plus the capnp install
   /// include root derived from the compiler binary location.
   pub resolution_roots: Vec<PathBuf>,
-  pub format: FormatOptions,
+  pub format:           FormatOptions,
 }
 
 impl Config {

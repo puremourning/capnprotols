@@ -63,7 +63,7 @@ pub fn parse_stderr(stderr: &str, file_path: &Path) -> Vec<Diagnostic> {
     out.push(Diagnostic {
       range: Range {
         start: Position::new(l1, c1),
-        end: Position::new(l2, c2),
+        end:   Position::new(l2, c2),
       },
       severity: Some(severity),
       source: Some("capnp".to_string()),
@@ -90,8 +90,9 @@ fn same_path(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use std::path::PathBuf;
+
+  use super::*;
 
   #[test]
   fn parses_basic_error() {

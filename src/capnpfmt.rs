@@ -53,8 +53,8 @@ fn main() -> ExitCode {
   }
 
   let opts = FormatOptions {
-    enabled: true,
-    max_width: width,
+    enabled:         true,
+    max_width:       width,
     warn_long_lines: false,
   };
 

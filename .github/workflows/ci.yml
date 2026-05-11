@@ -39,9 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check --unstable-features --error-on-unformatted
 
   clippy:
