@@ -63,18 +63,31 @@ hackily and quickly to deliver value. It therefore should not be relied on.
 the server gets the latest `startByte`/`endByte` and `FileSourceInfo` accessors.
 Override the search with `CAPNP_SCHEMA=/path/to/schema.capnp` if needed.
 
-## Build
+## Install
+
+From [crates.io](https://crates.io/crates/capnprotols) (recommended):
+
+```sh
+# latest published release
+cargo install capnprotols --locked
+
+# pin to a specific version
+cargo install capnprotols --locked --version 0.1.0
+```
+
+Both binaries (`capnprotols` and `capnpfmt`) are installed under `~/.cargo/bin/`.
+
+### Build from source
 
 ```sh
 cargo build --release
-# binary at target/release/capnprotols
+# binaries at target/release/{capnprotols,capnpfmt}
 ```
 
-Or install it onto `$PATH` (under `~/.cargo/bin/`):
+Or install the working tree onto `$PATH`:
 
 ```sh
 cargo install --path .
-# installs both ~/.cargo/bin/capnprotols and ~/.cargo/bin/capnpfmt
 ```
 
 ## capnpfmt
