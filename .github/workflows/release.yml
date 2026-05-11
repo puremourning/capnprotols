@@ -67,7 +67,7 @@ jobs:
           cargo test
 
       - name: Verify package
-        run: cargo publish -p capnprotols --dry-run
+        run: cargo publish -p capnprotols --allow-dirty --dry-run
 
       - name: Commit, tag, and push
         run: |
