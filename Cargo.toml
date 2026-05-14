@@ -45,6 +45,7 @@ capnp = "0.25"
 tree-sitter = "0.20"
 tree-sitter-capnp = "1.5"
 similar = "2"
+ignore = "0.4"
 
 [build-dependencies]
 capnpc = "0.25"

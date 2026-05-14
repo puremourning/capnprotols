@@ -115,6 +115,35 @@ capnpfmt --width 80 schema.capnp
 Bails on parse errors (leaves the file unchanged) so it's safe to run on
 save or in pre-commit hooks.
 
+### Ignoring files (`.capnpfmtignore`)
+
+`capnpfmt` honours `.capnpfmtignore` files (gitignore syntax) so you can
+run it against a recursive glob without rewriting vendored or generated
+schemas:
+
+```sh
+capnpfmt $(find . -name '*.capnp')
+```
+
+For each input file, `capnpfmt` walks up its ancestor directories
+collecting any `.capnpfmtignore` files until it hits a `.git` directory
+(or the filesystem root). The collected rules are applied in the usual
+gitignore order — deeper files can override shallower ones with `!`
+whitelist patterns. Matched files are skipped silently.
+
+Example `.capnpfmtignore`:
+
+```gitignore
+# Don't touch vendored schemas.
+vendor/
+
+# But do format our local fork.
+!vendor/local-fork/
+```
+
+Pass `--no-ignore` to bypass all `.capnpfmtignore` files for a single
+invocation.
+
 ## Configuration
 
 Settings are passed via `initializationOptions` on the `initialize` request.
