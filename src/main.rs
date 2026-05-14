@@ -11,7 +11,7 @@ mod semantic_tokens;
 mod server;
 
 // Re-export from lib crate so binary-local modules can use `crate::config` / `crate::format`.
-pub use capnprotols::{config, format};
+pub use capnprotols::{config, format, ignore_file};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {

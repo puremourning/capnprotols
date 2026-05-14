@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use ropey::Rope;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -11,15 +11,23 @@ use tracing::{debug, info, warn};
 
 use crate::config::{Config, InitOptions};
 use crate::document::DocumentStore;
+use crate::ignore_file::IgnoreCache;
 use crate::index::{Index, NodeInfo, NodeKind};
 use crate::{aliases, compiler, diagnostics, ordinals, semantic_tokens};
 
 pub struct Backend {
-  client:  Client,
-  docs:    DocumentStore,
-  config:  Arc<RwLock<Config>>,
+  client:       Client,
+  docs:         DocumentStore,
+  config:       Arc<RwLock<Config>>,
   /// Per-file symbol index, keyed by the file's URI.
-  indices: Arc<DashMap<Url, Arc<Index>>>,
+  indices:      Arc<DashMap<Url, Arc<Index>>>,
+  /// Memoizes `.capnpfmtignore` lookups by parent directory across the
+  /// server's lifetime. Consulted once per `did_open`; the resulting bool
+  /// is then stashed on the `Document` so format requests are just a bool
+  /// check. Discovery is not refreshed for the lifetime of the server, so
+  /// edits to `.capnpfmtignore` only take effect after a server restart
+  /// (or close+reopen of files whose decision the user wants re-evaluated).
+  ignore_cache: Arc<Mutex<IgnoreCache>>,
 }
 
 impl Backend {
@@ -29,6 +37,7 @@ impl Backend {
       docs: DocumentStore::new(),
       config: Arc::new(RwLock::new(Config::from_init(None))),
       indices: Arc::new(DashMap::new()),
+      ignore_cache: Arc::new(Mutex::new(IgnoreCache::new())),
     }
   }
 
@@ -251,10 +260,17 @@ impl LanguageServer for Backend {
 
   async fn did_open(&self, params: DidOpenTextDocumentParams) {
     let uri = params.text_document.uri.clone();
+    // Resolve .capnpfmtignore once per open; the decision sticks for the
+    // buffer's lifetime so format requests are a cheap bool check.
+    let ignored = match uri.to_file_path() {
+      Ok(p) => self.ignore_cache.lock().await.is_ignored(&p),
+      Err(_) => false,
+    };
     self.docs.open(
       uri.clone(),
       params.text_document.text,
       params.text_document.version,
+      ignored,
     );
     self.refresh(uri).await;
   }
@@ -421,6 +437,9 @@ impl LanguageServer for Backend {
     let uri = params.text_document.uri;
     let config = self.config.read().await.clone();
     if !config.format.enabled {
+      return Ok(Some(Vec::new()));
+    }
+    if self.docs.is_ignored(&uri) {
       return Ok(Some(Vec::new()));
     }
     let Some(text) = self.docs.get_text(&uri) else {

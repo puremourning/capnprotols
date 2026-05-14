@@ -13,13 +13,19 @@ use tower_lsp::lsp_types::{
 pub struct Document {
   pub version: i32,
   pub rope:    Rope,
+  /// Whether `.capnpfmtignore` excludes this file. Computed once at open
+  /// time; intentionally not refreshed on edit so the decision is stable
+  /// for the lifetime of the open buffer (mirrors how most LSPs treat
+  /// project-level config).
+  pub ignored: bool,
 }
 
 impl Document {
-  pub fn new(text: String, version: i32) -> Self {
+  pub fn new(text: String, version: i32, ignored: bool) -> Self {
     Self {
       version,
       rope: Rope::from_str(&text),
+      ignored,
     }
   }
 
@@ -68,8 +74,14 @@ impl DocumentStore {
     Self::default()
   }
 
-  pub fn open(&self, uri: Url, text: String, version: i32) {
-    self.inner.insert(uri, Document::new(text, version));
+  pub fn open(&self, uri: Url, text: String, version: i32, ignored: bool) {
+    self
+      .inner
+      .insert(uri, Document::new(text, version, ignored));
+  }
+
+  pub fn is_ignored(&self, uri: &Url) -> bool {
+    self.inner.get(uri).map(|d| d.ignored).unwrap_or(false)
   }
 
   pub fn close(&self, uri: &Url) {

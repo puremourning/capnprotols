@@ -631,6 +631,56 @@ fn formatting_skipped_on_parse_error() {
 }
 
 #[test]
+fn formatting_skipped_when_capnpfmtignore_matches() {
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&[]);
+  // Plant a fake repo root so .capnpfmtignore discovery stops in the tempdir.
+  std::fs::create_dir_all(proj.path(".git")).unwrap();
+  std::fs::write(proj.path(".capnpfmtignore"), "vendor/\n").unwrap();
+  std::fs::create_dir_all(proj.path("vendor")).unwrap();
+
+  // Same dirty content in two files; one matches the ignore, one doesn't.
+  let dirty = "@0xeaf06436acd04fd4;\nstruct A {\n        foo @0:Text;\n}\n";
+  let vendored = proj.path("vendor/foo.capnp");
+  let normal = proj.path("normal.capnp");
+  std::fs::write(&vendored, dirty).unwrap();
+  std::fs::write(&normal, dirty).unwrap();
+
+  let vendored_uri = format!("file://{}", vendored.display());
+  let normal_uri = format!("file://{}", normal.display());
+  c.open(&vendored_uri, dirty);
+  c.open(&normal_uri, dirty);
+
+  let v = c.request(
+    "textDocument/formatting",
+    json!({
+        "textDocument": { "uri": vendored_uri },
+        "options": { "tabSize": 2, "insertSpaces": true },
+    }),
+  );
+  assert!(
+    v["result"].as_array().expect("array").is_empty(),
+    "expected no edits on ignored file, got {:?}",
+    v["result"]
+  );
+
+  // The non-ignored file with identical content must still produce edits.
+  let n = c.request(
+    "textDocument/formatting",
+    json!({
+        "textDocument": { "uri": normal_uri },
+        "options": { "tabSize": 2, "insertSpaces": true },
+    }),
+  );
+  assert!(
+    !n["result"].as_array().expect("array").is_empty(),
+    "expected edits on non-ignored file"
+  );
+
+  c.shutdown();
+}
+
+#[test]
 fn semantic_tokens_returns_data() {
   let mut c = LspClient::start();
   let proj = user_project();
