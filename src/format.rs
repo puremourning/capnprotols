@@ -110,6 +110,9 @@ fn format_with_verbatim(
   // anchor soft-break continuation inside parens — items inside `(` written at
   // `anchor + INDENT_UNIT`, regardless of how nested the open paren itself was.
   let mut paren_anchors: Vec<usize> = Vec::new();
+  // Parallel stack marking whether each open bracket is an `@[` ordinal range. Inside
+  // one, ordinals pack tightly (`@[1,3]`, `@[3,5,7-9]`) with no spaces around `,`/`-`.
+  let mut ordinal_stack: Vec<bool> = Vec::new();
 
   let mut i = 0;
   while i < tokens.len() {
@@ -150,12 +153,14 @@ fn format_with_verbatim(
     };
 
     let paren_anchor = paren_anchors.last().copied();
+    let in_ordinal_range = ordinal_stack.last().copied().unwrap_or(false);
     let sep = separator(
       prev,
       tok,
       depth_for_this as usize,
       paren_depth,
       paren_anchor,
+      in_ordinal_range,
     );
     match sep {
       Sep::None => {}
@@ -185,13 +190,15 @@ fn format_with_verbatim(
     match tok.text.as_str() {
       "{" => depth += 1,
       "}" => depth -= 1,
-      "(" | "[" => {
+      "(" | "[" | "@[" => {
         paren_depth += 1;
         paren_anchors.push(current_line_indent);
+        ordinal_stack.push(tok.text == "@[");
       }
       ")" | "]" => {
         paren_depth -= 1;
         paren_anchors.pop();
+        ordinal_stack.pop();
       }
       _ => {}
     }
@@ -357,6 +364,7 @@ fn separator(
   depth: usize,
   paren_depth: i32,
   paren_anchor: Option<usize>,
+  in_ordinal_range: bool,
 ) -> Sep {
   let prev = match prev {
     None => {
@@ -430,6 +438,20 @@ fn separator(
       blank:  tok.blank_line_before,
       indent: depth * INDENT_UNIT,
     };
+  }
+
+  // === Ordinal-range packing: `@[1,3]`, `@[3,5,7-9]` — tight, no interior spaces ===
+
+  // Nothing hugs the opening `@[` (mirrors the `(` / `[` rule below).
+  if p == "@[" {
+    return Sep::None;
+  }
+  if in_ordinal_range {
+    // The range dash and the element separator both hug their neighbours so a range
+    // reads as `3-9` / `1,3` rather than `3 - 9` / `1, 3`.
+    if t == "-" || p == "-" || p == "," {
+      return Sep::None;
+    }
   }
 
   // === Operator and punctuation spacing ===
@@ -851,7 +873,10 @@ mod tests {
       out.contains("m @0 (a :Int32) -> (b :Int32);"),
       "method spacing wrong:\n{out}"
     );
-    assert!(out.contains("n @1! () -> ();"), "method spacing wrong:\n{out}");
+    assert!(
+      out.contains("n @1! () -> ();"),
+      "method spacing wrong:\n{out}"
+    );
   }
 
   #[test]

@@ -606,6 +606,7 @@ impl LanguageServer for Backend {
       NodeKind::Interface => "interface",
       NodeKind::Annotation => "annotation",
       NodeKind::Const => "const",
+      NodeKind::NewType => "type",
       NodeKind::File => "file",
       NodeKind::Other => "node",
     };
@@ -778,6 +779,7 @@ impl LanguageServer for Backend {
         NodeKind::Enum => CompletionItemKind::ENUM,
         NodeKind::Annotation => CompletionItemKind::INTERFACE,
         NodeKind::Const => CompletionItemKind::CONSTANT,
+        NodeKind::NewType => CompletionItemKind::CLASS,
         _ => CompletionItemKind::TEXT,
       }),
       detail: Some(n.display_name.clone()),

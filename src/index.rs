@@ -14,6 +14,9 @@ pub enum NodeKind {
   Interface,
   Const,
   Annotation,
+  /// A `type X = <target>` alias (newtype). Usable anywhere a type name is, so it
+  /// participates in type completion just like a struct or enum.
+  NewType,
   Other,
 }
 
@@ -124,6 +127,12 @@ impl Index {
     for node in cgr.get_nodes()?.iter() {
       let id = node.get_id();
       let display_name = node.get_display_name()?.to_string()?;
+      // Skip the synthetic `X.(template)` struct a `type X = group {…}` newtype emits to
+      // describe its layout — it's an internal node with no source position, not a
+      // user-facing declaration.
+      if display_name.ends_with(".(template)") {
+        continue;
+      }
       let prefix_len = node.get_display_name_prefix_length() as usize;
       let short_name = display_name.get(prefix_len..).unwrap_or("").to_string();
       let file = file_of_display_name(&display_name);
@@ -160,6 +169,11 @@ impl Index {
           annotation_value_type = type_target_id(&ty);
           NodeKind::Annotation
         }
+        // `type X = <target>` newtype. The compiler also emits a synthetic
+        // `X.(template)` struct node describing the alias's layout; it's an internal
+        // detail (its short_name carries the `.(template)` marker) that we skip below
+        // so it never surfaces as a completion candidate.
+        Ok(NodeWhich::Type(_)) => NodeKind::NewType,
         _ => NodeKind::Other,
       };
       let mut start_byte = node.get_start_byte();
@@ -367,12 +381,13 @@ impl Index {
             | NodeKind::Interface
             | NodeKind::Annotation
             | NodeKind::Const
+            | NodeKind::NewType
         )
     })
   }
 
-  /// Candidates that look like types: structs, enums, interfaces, plus consts (since
-  /// you can refer to constants in default values). Excludes annotations.
+  /// Candidates that look like types: structs, enums, interfaces, newtypes, plus consts
+  /// (since you can refer to constants in default values). Excludes annotations.
   pub fn type_candidates(&self) -> impl Iterator<Item = &NodeInfo> {
     self.nodes.values().filter(|n| {
       !n.short_name.is_empty()
@@ -382,6 +397,7 @@ impl Index {
             | NodeKind::Enum
             | NodeKind::Interface
             | NodeKind::Const
+            | NodeKind::NewType
         )
     })
   }

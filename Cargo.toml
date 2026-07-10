@@ -44,14 +44,20 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
-capnp = "0.25"
+capnp = "0.26"
 tree-sitter = "0.20"
 similar = "2"
 ignore = "0.4"
 
 [build-dependencies]
-capnpc = "0.25"
 cc = "1"
+
+# TEMPORARY: newtypes (`type X = …`) are not upstream yet, so the schema.capnp
+# bindings we re-export from `capnp` (see src/schema_capnp.rs) need the fork that
+# carries the `Node.type` union variant. Drop this section once a `capnp` release
+# on crates.io includes newtype support — nothing else has to change.
+[patch.crates-io]
+capnp = { git = "https://github.com/puremourning/capnproto-rust", branch = "newtype" }
 
 # `cargo release` drives version bumps, tagging, and publishing (see
 # .github/workflows/release.yml). Tags stay `vX.Y.Z` and the README install

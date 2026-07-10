@@ -499,6 +499,274 @@ fn signature_help_for_list() {
   c.shutdown();
 }
 
+/// The `type X = …` newtype / `@[…]` ordinal-range syntax is only understood by a
+/// patched `capnp` (>= the type-alias feature branch). Tests that need the *compiler*
+/// (diagnostics, index-backed completion) probe for it and skip on a stock toolchain;
+/// the semantic-token and formatting tests are pure tree-sitter and always run. To run
+/// the gated tests, put the patched `capnp` first on `PATH`.
+fn capnp_supports_newtypes() -> bool {
+  let dir = std::env::temp_dir();
+  let probe = dir.join("__capnprotols_newtype_probe__.capnp");
+  let _ = std::fs::write(
+    &probe,
+    "@0xe227b60577350103;\ntype T = UInt32;\nstruct S { x @0 :T; }\n",
+  );
+  let ok = Command::new("capnp")
+    .arg("compile")
+    .arg("-o-")
+    .arg(&probe)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false);
+  let _ = std::fs::remove_file(&probe);
+  ok
+}
+
+#[test]
+fn parses_newtype() {
+  if !capnp_supports_newtypes() {
+    eprintln!("skipping parses_newtype: `capnp` on PATH lacks newtype support");
+    return;
+  }
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+
+  let diags = c.open(&proj.uri("newtype.capnp"), &proj.text("newtype.capnp"));
+  assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+  c.shutdown();
+}
+
+/// Decode LSP semantic tokens (flat 5-tuples, delta-encoded) into absolute
+/// `(line, start_char, len, token_type)` rows.
+fn decode_semantic_tokens(data: &[Value]) -> Vec<(u32, u32, u32, u32)> {
+  let mut out = Vec::new();
+  let (mut line, mut col) = (0u32, 0u32);
+  for chunk in data.chunks(5) {
+    let d_line = chunk[0].as_u64().unwrap() as u32;
+    let d_start = chunk[1].as_u64().unwrap() as u32;
+    let len = chunk[2].as_u64().unwrap() as u32;
+    let ty = chunk[3].as_u64().unwrap() as u32;
+    if d_line == 0 {
+      col += d_start;
+    } else {
+      line += d_line;
+      col = d_start;
+    }
+    out.push((line, col, len, ty));
+  }
+  out
+}
+
+// Semantic-token type indices — the order of `TOKEN_TYPES` in src/semantic_tokens.rs.
+const ST_KEYWORD: u32 = 0;
+const ST_TYPE: u32 = 1;
+const ST_NUMBER: u32 = 11;
+
+#[test]
+fn semantic_tokens_highlight_newtype_syntax() {
+  // Pure tree-sitter (no compiler), so this runs regardless of the `capnp` on PATH.
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+  let uri = proj.uri("newtype.capnp");
+  let text = proj.text("newtype.capnp");
+  c.open(&uri, &text);
+
+  let r = c.request(
+    "textDocument/semanticTokens/full",
+    json!({ "textDocument": { "uri": uri } }),
+  );
+  let data = r["result"]["data"].as_array().expect("data array");
+  let toks = decode_semantic_tokens(data);
+  let lines: Vec<&str> = text.lines().collect();
+  // Resolve each token back to the source text it covers.
+  let slice = |line: u32, col: u32, len: u32| -> String {
+    lines
+      .get(line as usize)
+      .and_then(|l| {
+        let (s, e) = (col as usize, (col + len) as usize);
+        l.get(s..e)
+      })
+      .unwrap_or("")
+      .to_string()
+  };
+  let has = |pred: &dyn Fn(&str, u32) -> bool| {
+    toks
+      .iter()
+      .any(|&(l, c0, len, ty)| pred(&slice(l, c0, len), ty))
+  };
+
+  // The `type` keyword of `type UUID = …` / `type Price = …` is highlighted as a keyword.
+  assert!(
+    has(&|txt, ty| txt == "type" && ty == ST_KEYWORD),
+    "the `type` keyword should be a KEYWORD token; got {toks:?}"
+  );
+  // The newtype's name is highlighted as a type.
+  assert!(
+    has(&|txt, ty| txt == "UUID" && ty == ST_TYPE),
+    "newtype name UUID should be a TYPE token"
+  );
+  // The mapped ordinals inside `@[1,3]` are highlighted as numbers (they used to be
+  // dropped from the parse tree entirely).
+  let ordinal_line = lines
+    .iter()
+    .position(|l| l.contains("@[1,3]"))
+    .expect("ordinal-range line") as u32;
+  assert!(
+    toks.iter().any(|&(l, c0, len, ty)| l == ordinal_line
+      && ty == ST_NUMBER
+      && slice(l, c0, len).chars().all(|ch| ch.is_ascii_digit())),
+    "ordinals in `@[1,3]` should be NUMBER tokens; got {toks:?}"
+  );
+  c.shutdown();
+}
+
+#[test]
+fn formatting_preserves_and_normalises_ordinal_ranges() {
+  // Pure tree-sitter (no compiler). Feed deliberately messy ranges and check they come
+  // back tight — the formatter used to strip the `@[…]` contents entirely.
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&[]);
+  let path = proj.path("ranges.capnp");
+  let dirty = "@0xeaf06436acd04fe9;\nstruct Order {\n  a @[ 1 , 3 ] :Price;\n  b @[0 - 2] :Price;\n  c @[3,5,7-9] :Price;\n}\n";
+  std::fs::write(&path, dirty).unwrap();
+  let uri = format!("file://{}", path.display());
+  c.open(&uri, dirty);
+
+  let r = c.request(
+    "textDocument/formatting",
+    json!({
+        "textDocument": { "uri": uri },
+        "options": { "tabSize": 2, "insertSpaces": true },
+    }),
+  );
+  let edits = r["result"].as_array().expect("array of edits");
+  let formatted = apply_edits(dirty, edits);
+  for want in [
+    "a @[1,3] :Price;",
+    "b @[0-2] :Price;",
+    "c @[3,5,7-9] :Price;",
+  ] {
+    assert!(
+      formatted.contains(want),
+      "missing {want:?} in formatted output:\n{formatted}"
+    );
+  }
+
+  // Idempotency: formatting the tidy output yields no further edits.
+  c.change(&uri, 2, &formatted);
+  let r2 = c.request(
+    "textDocument/formatting",
+    json!({
+        "textDocument": { "uri": uri },
+        "options": { "tabSize": 2, "insertSpaces": true },
+    }),
+  );
+  let edits2 = r2["result"].as_array().expect("array");
+  assert!(
+    edits2.is_empty(),
+    "ordinal-range formatting not idempotent: {edits2:?}"
+  );
+  c.shutdown();
+}
+
+#[test]
+fn completion_field_ordinal_after_range() {
+  // Next-ordinal completion is textual, so it works without the patched compiler.
+  // Ranges must be expanded: @[0,1-2] uses 0,1,2 and @3 uses 3, so the only free
+  // ordinal is 4 — the range ordinals must NOT be re-offered.
+  let mut c = LspClient::start();
+  let uri = "file:///tmp/capnprotols-test-ord-range.capnp".to_string();
+  let text = "@0xeaf06436acd04fcb;\nstruct Order {\n  a @[0,1-2] :P;\n  b @3 :Text;\n  c @\n}\n";
+  std::fs::write("/tmp/capnprotols-test-ord-range.capnp", text).unwrap();
+  c.open(&uri, text);
+
+  // `  c @` — `@` is at column 4, cursor right after it at column 5.
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(4, 5) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  assert_eq!(labels, vec!["4"], "range ordinals mis-counted: {labels:?}");
+  c.shutdown();
+}
+
+#[test]
+fn goto_definition_on_newtype() {
+  if !capnp_supports_newtypes() {
+    eprintln!(
+      "skipping goto_definition_on_newtype: `capnp` lacks newtype support"
+    );
+    return;
+  }
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+  let uri = proj.uri("newtype.capnp");
+  let text = proj.text("newtype.capnp");
+  c.open(&uri, &text);
+
+  // Cursor inside `UUID` of `id @0 :UUID` should jump to `type UUID = …`.
+  let (line, col) = locate_inside(&text, "id @0 :UUID", "UUID");
+  let r = c.request(
+    "textDocument/definition",
+    json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+  );
+  let result = &r["result"];
+  assert!(result.is_object(), "expected definition, got {r}");
+  let target = result["uri"].as_str().expect("target uri");
+  assert!(target.ends_with("/newtype.capnp"), "got {target}");
+  let target_line = result["range"]["start"]["line"].as_u64().unwrap() as usize;
+  let decl = text.lines().nth(target_line).unwrap_or("");
+  assert!(
+    decl.contains("type UUID"),
+    "expected to land on `type UUID = …`, got line {target_line}: {decl:?}"
+  );
+  c.shutdown();
+}
+
+#[test]
+fn completion_after_colon_offers_newtypes() {
+  if !capnp_supports_newtypes() {
+    eprintln!(
+      "skipping completion_after_colon_offers_newtypes: \
+       `capnp` on PATH lacks newtype support"
+    );
+    return;
+  }
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+  let uri = proj.uri("newtype.capnp");
+  let text = proj.text("newtype.capnp");
+  let diags = c.open(&uri, &text);
+  assert!(diags.is_empty(), "fixture should compile clean: {diags:?}");
+
+  // Right after `:` in `id @0 :UUID`.
+  let (line, col) = locate(&text, "id @0 :UUID", ":");
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+  );
+  let items = r["result"].as_array().expect("array of items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  // The two newtypes are offered as type candidates alongside builtins.
+  for want in ["UUID", "Price"] {
+    assert!(labels.contains(&want), "missing newtype {want}: {labels:?}");
+  }
+  for builtin in ["Text", "Int64"] {
+    assert!(labels.contains(&builtin), "missing builtin {builtin}");
+  }
+  // The synthetic `Price.(template)` node must never leak into completions.
+  assert!(
+    !labels.iter().any(|l| l.contains("template")),
+    "synthetic template node leaked: {labels:?}"
+  );
+  c.shutdown();
+}
+
 #[test]
 fn formatting_emits_minimal_per_line_edits() {
   // Only one line is dirty; the formatter should return a TextEdit covering just that

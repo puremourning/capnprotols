@@ -54,14 +54,14 @@ hackily and quickly to deliver value. It therefore should not be relied on.
 ## Build Requirements
 
 - Rust toolchain (build only): `cargo`, `rustc`.
-- A Cap'n Proto installation: the `capnp` binary on `$PATH` and its
-  `capnp/schema.capnp` available under one of the install's include directories
-  (Homebrew, MacPorts, apt and most manual installs put it there automatically).
-  Tested with 1.3.0.
+- A C compiler (build only), to compile the vendored tree-sitter parser in
+  `grammar/`.
+- A Cap'n Proto installation: the `capnp` binary on `$PATH`, which the server
+  shells out to for compilation and diagnostics. Tested with 1.3.0.
 
-`build.rs` regenerates the Rust bindings from the installed `schema.capnp` so
-the server gets the latest `startByte`/`endByte` and `FileSourceInfo` accessors.
-Override the search with `CAPNP_SCHEMA=/path/to/schema.capnp` if needed.
+The `schema.capnp` bindings are re-exported straight from the `capnp` crate
+(see `src/schema_capnp.rs`), so nothing is generated at build time and no
+`schema.capnp` is needed on the build machine.
 
 ## Install
 
