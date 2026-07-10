@@ -630,6 +630,7 @@ impl LanguageServer for Backend {
       NodeKind::Interface => "interface",
       NodeKind::Annotation => "annotation",
       NodeKind::Const => "const",
+      NodeKind::NewType => "type",
       NodeKind::File => "file",
       NodeKind::Other => "node",
     };
@@ -789,7 +790,9 @@ fn node_completion_item(n: &NodeInfo) -> CompletionItem {
       NodeKind::Enum => CompletionItemKind::ENUM,
       NodeKind::Annotation => CompletionItemKind::INTERFACE,
       NodeKind::Const => CompletionItemKind::CONSTANT,
-      _ => CompletionItemKind::TEXT,
+      NodeKind::NewType => CompletionItemKind::CLASS,
+      NodeKind::File => CompletionItemKind::TEXT,
+      NodeKind::Other => CompletionItemKind::TEXT,
     }),
     detail: Some(n.signature()),
     documentation: n.doc_comment.as_ref().map(|d| {

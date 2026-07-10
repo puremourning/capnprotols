@@ -196,6 +196,18 @@ fn collect_ordinals(body: &str, outer: BlockKind) -> Vec<u32> {
       }
     }
     if bytes[i] == b'@' {
+      // Ordinal-range form `@[A, B-C, D]` (inlined-newtype fields): every listed
+      // ordinal — and every ordinal in an `A-B` sub-range, inclusive — is consumed in
+      // this struct's ID space, so they all count toward the next-ordinal computation.
+      if bytes.get(i + 1) == Some(&b'[') {
+        let mut j = i + 2;
+        while j < bytes.len() && bytes[j] != b']' {
+          j += 1;
+        }
+        out.extend(parse_ordinal_range(&body[(i + 2).min(bytes.len())..j]));
+        i = if j < bytes.len() { j + 1 } else { j };
+        continue;
+      }
       let mut j = i + 1;
       while j < bytes.len() && bytes[j].is_ascii_digit() {
         j += 1;
@@ -209,6 +221,36 @@ fn collect_ordinals(body: &str, outer: BlockKind) -> Vec<u32> {
       }
     }
     i += 1;
+  }
+  out
+}
+
+/// Expand the interior of an `@[…]` ordinal range (the text between the brackets) into
+/// the concrete ordinals it covers. Elements are comma-separated; each is either a single
+/// `N` or an inclusive sub-range `A-B`. Malformed pieces are skipped.
+fn parse_ordinal_range(inner: &str) -> Vec<u32> {
+  let mut out = Vec::new();
+  for part in inner.split(',') {
+    let part = part.trim();
+    if part.is_empty() {
+      continue;
+    }
+    match part.split_once('-') {
+      Some((a, b)) => {
+        if let (Ok(a), Ok(b)) =
+          (a.trim().parse::<u32>(), b.trim().parse::<u32>())
+        {
+          for n in a..=b {
+            out.push(n);
+          }
+        }
+      }
+      None => {
+        if let Ok(n) = part.parse::<u32>() {
+          out.push(n);
+        }
+      }
+    }
   }
   out
 }
@@ -307,5 +349,36 @@ mod tests {
   fn ignores_at_in_string() {
     let src = "struct A { foo @0 :Text = \"hello @99 world\"; bar @|";
     assert_eq!(ord_at(src), Some(1));
+  }
+
+  #[test]
+  fn ordinal_range_consumes_all_listed_ordinals() {
+    // Range maps parent ordinals 1 and 3; with @0 and @2 that's 0..=3 all used, so the
+    // next ordinal is 4 (not 1 or 3, which the old @<n>-only scan wrongly re-offered).
+    let src =
+      "struct Order {\n  id @0 :UUID;\n  price @[1,3] :Price;\n  quantity @2 :Int64;\n  next @|";
+    assert_eq!(ord_at(src), Some(4));
+  }
+
+  #[test]
+  fn mixed_ordinal_range_with_subranges() {
+    // @[0,1-2] uses 0,1,2; @[3,5,4] uses 3,4,5 -> 0..=5 used, next is 6.
+    let src = "struct Employee {\n  person @[0,1-2] :Person;\n  manager @[3,5,4] :Person;\n  next @|";
+    assert_eq!(ords_at(src), vec![6]);
+  }
+
+  #[test]
+  fn ordinal_range_leaves_gaps_offered() {
+    // @[0,2] and @3 -> used {0,2,3}; gap 1 is offered before next 4.
+    let src = "struct S {\n  a @[0,2] :T;\n  b @3 :Text;\n  c @|";
+    assert_eq!(ords_at(src), vec![1, 4]);
+  }
+
+  #[test]
+  fn parse_range_expands_singles_and_subranges() {
+    assert_eq!(parse_ordinal_range("0,1-2"), vec![0, 1, 2]);
+    assert_eq!(parse_ordinal_range("3,5,4"), vec![3, 5, 4]);
+    assert_eq!(parse_ordinal_range("10-13"), vec![10, 11, 12, 13]);
+    assert_eq!(parse_ordinal_range(" 7 "), vec![7]);
   }
 }
