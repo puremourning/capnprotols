@@ -72,7 +72,7 @@ From [crates.io](https://crates.io/crates/capnprotols) (recommended):
 cargo install capnprotols --locked
 
 # pin to a specific version
-cargo install capnprotols --locked --version 0.1.3
+cargo install capnprotols --locked --version 0.2.0
 ```
 
 Both binaries (`capnprotols` and `capnpfmt`) are installed under `~/.cargo/bin/`.
