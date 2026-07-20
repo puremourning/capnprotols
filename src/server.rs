@@ -239,6 +239,9 @@ impl LanguageServer for Backend {
             ".".to_string(),
             "$".to_string(),
             "@".to_string(),
+            // Ordinal-range slots: `@[<here>` and `@[3,<here>`.
+            "[".to_string(),
+            ",".to_string(),
           ]),
           ..Default::default()
         }),
@@ -771,25 +774,63 @@ impl LanguageServer for Backend {
       CursorContext::None => return Ok(None),
     };
 
-    let mut items: Vec<CompletionItem> = prelude;
-    items.extend(candidates.into_iter().map(|n| CompletionItem {
-      label: n.short_name.clone(),
-      kind: Some(match n.kind {
-        NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
-        NodeKind::Enum => CompletionItemKind::ENUM,
-        NodeKind::Annotation => CompletionItemKind::INTERFACE,
-        NodeKind::Const => CompletionItemKind::CONSTANT,
-        NodeKind::NewType => CompletionItemKind::CLASS,
-        _ => CompletionItemKind::TEXT,
-      }),
-      detail: Some(n.display_name.clone()),
-      documentation: n.doc_comment.as_ref().map(|d| {
-        Documentation::MarkupContent(MarkupContent {
-          kind:  MarkupKind::Markdown,
-          value: d.clone(),
+    // When completing a type into an empty `@[] :` slot, we can fill the brackets with a
+    // correctly-sized ordinal range for group/union newtypes. Compute the target bracket
+    // span and the first free ordinal once; each newtype item then carries its own range
+    // (sized by that newtype's field count) as an additionalTextEdit.
+    let range_autofill: Option<(Range, u32)> =
+      if matches!(ctx, CursorContext::Type) {
+        empty_ordinal_range_slot(&text, byte).and_then(|(s, e)| {
+          let start =
+            ordinals::suggest_ordinals_at(&text, byte).last().copied()?;
+          let range =
+            Range::new(byte_to_position(&rope, s), byte_to_position(&rope, e));
+          Some((range, start))
         })
-      }),
-      ..Default::default()
+      } else {
+        None
+      };
+
+    let mut items: Vec<CompletionItem> = prelude;
+    items.extend(candidates.into_iter().map(|n| {
+      // Group/union newtype in an empty `@[]`: offer to fill the range `A` / `A-B`.
+      let additional_text_edits =
+        match (&range_autofill, n.kind, n.newtype_ordinals) {
+          (Some((range, start)), NodeKind::NewType, Some(count))
+            if count > 0 =>
+          {
+            let fill = if count == 1 {
+              start.to_string()
+            } else {
+              format!("{}-{}", start, start + count - 1)
+            };
+            Some(vec![TextEdit {
+              range:    *range,
+              new_text: fill,
+            }])
+          }
+          _ => None,
+        };
+      CompletionItem {
+        label: n.short_name.clone(),
+        kind: Some(match n.kind {
+          NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
+          NodeKind::Enum => CompletionItemKind::ENUM,
+          NodeKind::Annotation => CompletionItemKind::INTERFACE,
+          NodeKind::Const => CompletionItemKind::CONSTANT,
+          NodeKind::NewType => CompletionItemKind::CLASS,
+          _ => CompletionItemKind::TEXT,
+        }),
+        detail: Some(n.display_name.clone()),
+        documentation: n.doc_comment.as_ref().map(|d| {
+          Documentation::MarkupContent(MarkupContent {
+            kind:  MarkupKind::Markdown,
+            value: d.clone(),
+          })
+        }),
+        additional_text_edits,
+        ..Default::default()
+      }
     }));
     Ok(Some(CompletionResponse::Array(items)))
   }
@@ -1174,6 +1215,25 @@ fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
     if k > 0 && bytes[k - 1] == b'@' {
       return CursorContext::FieldOrdinal;
     }
+    // Ordinal-range slot: the cursor is inside `@[…]`, e.g. `@[0, 2-|` or `@[1, |]`.
+    // Walk back over the range's interior tokens (digits, separators, whitespace); if
+    // that run opens with `@[`, we're placing another mapped ordinal, so suggest the
+    // next free one just like after a bare `@`.
+    let mut r = cursor;
+    while r > 0
+      && matches!(bytes[r - 1], b'0'..=b'9' | b' ' | b'\t' | b',' | b'-')
+    {
+      r -= 1;
+    }
+    if r >= 2 && bytes[r - 1] == b'[' && bytes[r - 2] == b'@' {
+      return CursorContext::FieldOrdinal;
+    }
+  }
+  // A bare `[` that isn't `@[` (a const list `[1, 2]` or annotation array `[…]`) is not a
+  // type/keyword slot — now that `[` is a trigger character, suppress rather than pop noise
+  // there. The `@[` ordinal case already returned above.
+  if cursor >= 1 && bytes[cursor - 1] == b'[' {
+    return CursorContext::None;
   }
   // Skip the identifier currently being typed.
   let mut i = cursor;
@@ -1214,6 +1274,54 @@ fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
     }
     _ => CursorContext::Unknown,
   }
+}
+
+/// If the cursor sits in the type slot of a field whose ordinal is an *empty* range
+/// (`name @[] :Type`), return the byte span of the bracket interior (between `[` and `]`)
+/// so it can be filled in with a correctly-sized ordinal range. Returns `None` if the
+/// range already has content, or the field doesn't use the `@[…]` form at all.
+fn empty_ordinal_range_slot(
+  text: &str,
+  cursor: usize,
+) -> Option<(usize, usize)> {
+  let b = text.as_bytes();
+  let mut i = cursor.min(b.len());
+  // Skip the partial type name being typed (identifier chars + namespace dots).
+  while i > 0
+    && (b[i - 1].is_ascii_alphanumeric()
+      || b[i - 1] == b'_'
+      || b[i - 1] == b'.')
+  {
+    i -= 1;
+  }
+  let skip_ws = |mut j: usize| {
+    while j > 0 && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+      j -= 1;
+    }
+    j
+  };
+  i = skip_ws(i);
+  // The type slot must be introduced by `:`.
+  if i == 0 || b[i - 1] != b':' {
+    return None;
+  }
+  i = skip_ws(i - 1);
+  // …preceded by the closing `]` of the ordinal range.
+  if i == 0 || b[i - 1] != b']' {
+    return None;
+  }
+  let close = i - 1;
+  // Walk back over the (whitespace-only) interior to the opening `[`.
+  let open = skip_ws(close);
+  if open == 0 || b[open - 1] != b'[' {
+    return None; // interior wasn't empty, or there's no `[`
+  }
+  let bracket = open - 1;
+  // …which must be an `@[` ordinal-range opener.
+  if bracket == 0 || b[bracket - 1] != b'@' {
+    return None;
+  }
+  Some((bracket + 1, close))
 }
 
 /// If `byte` falls inside a `"..."` string that's the operand of an `import` keyword,

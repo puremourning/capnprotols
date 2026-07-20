@@ -695,6 +695,178 @@ fn completion_field_ordinal_after_range() {
 }
 
 #[test]
+fn completion_ordinal_inside_range() {
+  // Idea 1: ordinal completion also fires inside `@[…]`, after a `,`. Textual, so no
+  // compiler needed. `a @0` + the `1` already in the range → next free ordinal is 2.
+  let mut c = LspClient::start();
+  let uri = "file:///tmp/capnprotols-test-ord-inrange.capnp".to_string();
+  let text =
+    "@0xeaf06436acd04fcc;\nstruct O {\n  a @0 :Text;\n  b @[1, ] :G;\n}\n";
+  std::fs::write("/tmp/capnprotols-test-ord-inrange.capnp", text).unwrap();
+  c.open(&uri, text);
+
+  // Line 3 `  b @[1, ] :G;` — cursor at column 9, between the space and `]`.
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(3, 9) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  assert_eq!(labels.first().copied(), Some("2"), "got {labels:?}");
+  c.shutdown();
+}
+
+#[test]
+fn completion_type_fills_empty_ordinal_range() {
+  // Idea 2: completing a group newtype into an empty `@[]` attaches an additionalTextEdit
+  // that fills the brackets with a correctly-sized ordinal range.
+  if !capnp_supports_newtypes() {
+    eprintln!(
+      "skipping completion_type_fills_empty_ordinal_range: no newtype support"
+    );
+    return;
+  }
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+  let path = proj.path("range_fill.capnp");
+  // A valid version first, so the index learns Price is a 2-field group newtype.
+  let valid = "@0xeaf06436acd04fec;\nusing Json = import \"/capnp/compat/json.capnp\";\ntype Price = group {\n  value @0 :Int64;\n  scale @1 :UInt16;\n}\nstruct Order {\n  a @0 :Int64;\n  p @[1-2] :Price;\n}\n";
+  std::fs::write(&path, valid).unwrap();
+  let uri = format!("file://{}", path.display());
+  c.open(&uri, valid);
+
+  // Now simulate typing `p @[] :Pr` — invalid mid-edit, but the cached index still knows
+  // Price. The empty `@[]` should be filled with the next free range: a@0 used, so `1-2`.
+  let editing = valid.replace("p @[1-2] :Price;", "p @[] :Pr");
+  c.change(&uri, 2, &editing);
+
+  let (line, col) = locate(&editing, "p @[] :Pr", "Pr");
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let price = items
+    .iter()
+    .find(|i| i["label"] == "Price")
+    .expect("Price candidate");
+  let edits = price["additionalTextEdits"]
+    .as_array()
+    .expect("additionalTextEdits on Price");
+  assert_eq!(edits.len(), 1, "expected one autofill edit: {edits:?}");
+  assert_eq!(
+    edits[0]["newText"], "1-2",
+    "wrong range fill for a 2-ordinal newtype: {edits:?}"
+  );
+  // The edit targets the empty bracket interior (a zero-width span inside `[]`).
+  let er = &edits[0]["range"];
+  assert_eq!(er["start"], er["end"], "fill should insert into empty `[]`");
+
+  // A plain struct/enum (no ordinal count) must NOT get an autofill edit.
+  if let Some(side) = items.iter().find(|i| i["label"] == "Side") {
+    assert!(
+      side
+        .get("additionalTextEdits")
+        .map_or(true, |v| v.is_null()),
+      "non-newtype should not autofill a range"
+    );
+  }
+  c.shutdown();
+}
+
+#[test]
+fn completion_ordinal_at_empty_range_open() {
+  // `[` is a trigger char: opening `@[` immediately offers the next ordinal. Textual.
+  let mut c = LspClient::start();
+  let uri = "file:///tmp/capnprotols-test-ord-open.capnp".to_string();
+  let text =
+    "@0xeaf06436acd04fce;\nstruct O {\n  a @0 :Text;\n  b @[] :G;\n}\n";
+  std::fs::write("/tmp/capnprotols-test-ord-open.capnp", text).unwrap();
+  c.open(&uri, text);
+
+  // Line 3 `  b @[] :G;` — cursor between `[` (col 5) and `]`, i.e. col 6.
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(3, 6) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  assert_eq!(labels.first().copied(), Some("1"), "got {labels:?}");
+  c.shutdown();
+}
+
+#[test]
+fn completion_bare_bracket_is_quiet() {
+  // `,` and `[` are trigger chars now, but a bare `[` (a const list, not `@[`) must not
+  // pop keyword/type noise — and must never crash. Expect an empty/null result.
+  let mut c = LspClient::start();
+  let uri = "file:///tmp/capnprotols-test-bare-bracket.capnp".to_string();
+  let text = "@0xeaf06436acd04fcf;\nconst xs :List(UInt8) = [1, 2];\n";
+  std::fs::write("/tmp/capnprotols-test-bare-bracket.capnp", text).unwrap();
+  c.open(&uri, text);
+
+  // Cursor right after the `[` in `= [1, 2]`.
+  let line = "const xs :List(UInt8) = [1, 2];";
+  let col = (line.find('[').unwrap() + 1) as u32;
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(1, col) }),
+  );
+  // Either a null result or an empty array is acceptable; the point is no crash and no
+  // keyword/type suggestions leaking into a const list.
+  let empty = r["result"].is_null()
+    || r["result"]
+      .as_array()
+      .map(|a| a.is_empty())
+      .unwrap_or(false);
+  assert!(empty, "bare `[` should be quiet, got {}", r["result"]);
+  c.shutdown();
+}
+
+#[test]
+fn completion_type_fills_range_for_union_newtype() {
+  // A *union* newtype's template flattens its members to direct explicit-ordinal fields,
+  // so its ordinal span (and thus the `@[…]` size) is max-ordinal + 1 — here 2, for a
+  // two-arm union. Confirms group and union newtypes are both sized correctly.
+  if !capnp_supports_newtypes() {
+    eprintln!("skipping completion_type_fills_range_for_union_newtype: no newtype support");
+    return;
+  }
+  let mut c = LspClient::start();
+  let proj = TempProject::with_fixtures(&["newtype.capnp"]);
+  let path = proj.path("union_fill.capnp");
+  let valid = "@0xeaf06436acd04fed;\ntype Kind = union {\n  a @0 :UInt32;\n  b @1 :UInt32;\n}\nstruct Holder {\n  first @0 :Text;\n  k @[1-2] :Kind;\n}\n";
+  std::fs::write(&path, valid).unwrap();
+  let uri = format!("file://{}", path.display());
+  c.open(&uri, valid);
+
+  // Mid-edit: `k @[] :Ki`. first@0 is used, so the two Kind ordinals fill as `1-2`.
+  let editing = valid.replace("k @[1-2] :Kind;", "k @[] :Ki");
+  c.change(&uri, 2, &editing);
+
+  let (line, col) = locate(&editing, "k @[] :Ki", "Ki");
+  let r = c.request(
+    "textDocument/completion",
+    json!({ "textDocument": { "uri": uri }, "position": pos(line, col) }),
+  );
+  let items = r["result"].as_array().expect("items");
+  let kind = items
+    .iter()
+    .find(|i| i["label"] == "Kind")
+    .expect("Kind candidate");
+  let edits = kind["additionalTextEdits"]
+    .as_array()
+    .expect("additionalTextEdits on Kind");
+  assert_eq!(
+    edits[0]["newText"], "1-2",
+    "union newtype should span 2 ordinals: {edits:?}"
+  );
+  c.shutdown();
+}
+
+#[test]
 fn goto_definition_on_newtype() {
   if !capnp_supports_newtypes() {
     eprintln!(

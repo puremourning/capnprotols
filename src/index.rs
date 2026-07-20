@@ -45,6 +45,17 @@ pub struct NodeInfo {
   /// For annotation nodes, the typeId of the value type (typically a struct whose fields
   /// are the named arguments at the application site).
   pub annotation_value_type: Option<u64>,
+  /// For a group/union newtype (`type X = group {…}`), how many ordinals a use site must
+  /// map in its `@[…]` range — the ordinal span (highest mapped ordinal + 1) of the alias's
+  /// template struct. `None` for primitive/enum newtypes (which take a normal `@N`) and for
+  /// non-newtypes.
+  ///
+  /// Read straight off the alias's own template: its mapping is assumed complete, so we
+  /// never have to look through a field that is itself a newtype. Today templates are flat
+  /// slots, so the span equals the field count; using the span (rather than the count)
+  /// stays correct once nested newtypes are stamped into the template and a single field
+  /// can cover several ordinals.
+  pub newtype_ordinals:      Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,12 +126,18 @@ impl Index {
     // First pass: collect basic metadata for every node so we can render type
     // references that point at other nodes (e.g. a struct field of type `:OtherType`).
     let mut display_name_by_id: HashMap<u64, String> = HashMap::new();
+    // Ordinal span (highest mapped ordinal + 1) of every struct node, keyed by id — used
+    // to size a group newtype's `@[…]` range (the alias points at a `.(template)` struct).
+    let mut struct_ordinal_spans: HashMap<u64, u32> = HashMap::new();
     for node in cgr.get_nodes()?.iter() {
       let dn = node.get_display_name()?.to_string()?;
       let prefix_len = node.get_display_name_prefix_length() as usize;
       let short = dn.get(prefix_len..).unwrap_or("").to_string();
       display_name_by_id
         .insert(node.get_id(), if short.is_empty() { dn } else { short });
+      if let Ok(schema_capnp::node::Which::Struct(s)) = node.which() {
+        struct_ordinal_spans.insert(node.get_id(), struct_ordinal_span(&s)?);
+      }
     }
 
     // Nodes
@@ -144,6 +161,7 @@ impl Index {
       }
       let mut fields: Vec<FieldInfo> = Vec::new();
       let mut annotation_value_type: Option<u64> = None;
+      let mut newtype_ordinals: Option<u32> = None;
       use schema_capnp::node::Which as NodeWhich;
       let kind = match node.which() {
         Ok(NodeWhich::File(())) => NodeKind::File,
@@ -172,8 +190,14 @@ impl Index {
         // `type X = <target>` newtype. The compiler also emits a synthetic
         // `X.(template)` struct node describing the alias's layout; it's an internal
         // detail (its short_name carries the `.(template)` marker) that we skip below
-        // so it never surfaces as a completion candidate.
-        Ok(NodeWhich::Type(_)) => NodeKind::NewType,
+        // so it never surfaces as a completion candidate. When the alias resolves to a
+        // group/union (a struct template), record its field count so use sites can be
+        // offered a correctly-sized `@[…]` ordinal range.
+        Ok(NodeWhich::Type(t)) => {
+          newtype_ordinals = type_target_id(&t?)
+            .and_then(|id| struct_ordinal_spans.get(&id).copied());
+          NodeKind::NewType
+        }
         _ => NodeKind::Other,
       };
       let mut start_byte = node.get_start_byte();
@@ -199,6 +223,7 @@ impl Index {
           parameters,
           fields,
           annotation_value_type,
+          newtype_ordinals,
         },
       );
     }
@@ -436,6 +461,25 @@ impl Index {
       })
       .collect()
   }
+}
+
+/// The ordinal span of a struct node — the highest explicitly-mapped field ordinal plus
+/// one, i.e. how many ordinals the struct occupies. For a group newtype's template this is
+/// the number of `@[…]` entries a use site must supply. Falls back to the field count when
+/// no field carries an explicit ordinal.
+fn struct_ordinal_span(s: &schema_capnp::node::struct_::Reader) -> Result<u32> {
+  use schema_capnp::field::ordinal::Which as OrdWhich;
+  let fields = s.get_fields()?;
+  let mut max: Option<u16> = None;
+  for f in fields.iter() {
+    if let Ok(OrdWhich::Explicit(o)) = f.get_ordinal().which() {
+      max = Some(max.map_or(o, |m| m.max(o)));
+    }
+  }
+  Ok(match max {
+    Some(m) => m as u32 + 1,
+    None => fields.len(),
+  })
 }
 
 /// Render a `Type` reader (from CGR) as a human-readable string. Falls back to typeId
