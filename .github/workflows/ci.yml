@@ -50,3 +50,37 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -Dwarnings
+
+  # grammar/ is vendored from the vendor/tree-sitter-capnp submodule by
+  # scripts/vendor-grammar.sh: the generated parser.c, the highlights query, and
+  # the grammar's LICENSE. Regenerate parser.c from the pinned tree-sitter CLI,
+  # re-run the vendor script, and fail if anything under grammar/ has drifted — so
+  # grammar or query edits can never land without the vendored copies being updated.
+  grammar:
+    name: grammar in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install pinned tree-sitter CLI
+        working-directory: vendor/tree-sitter-capnp
+        run: npm ci
+      - name: Regenerate parser from grammar.js
+        working-directory: vendor/tree-sitter-capnp
+        # Only `tree-sitter generate` touches parser.c; `npm run build` additionally
+        # runs node-gyp, which needs a native toolchain and is irrelevant here.
+        # highlights.scm and LICENSE are static — the vendor script re-copies them.
+        run: ./node_modules/.bin/tree-sitter generate
+      - name: Re-vendor into grammar/ (parser.c, highlights.scm, LICENSE)
+        run: ./scripts/vendor-grammar.sh
+      - name: Fail if the vendored grammar has drifted
+        run: |
+          if ! git diff --exit-code -- grammar/; then
+            echo "::error::grammar/ is out of sync with vendor/tree-sitter-capnp." \
+                 "Run scripts/vendor-grammar.sh and commit the result."
+            exit 1
+          fi

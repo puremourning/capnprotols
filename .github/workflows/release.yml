@@ -42,44 +42,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump version
-        run: |
-          # Update [package].version (the first `version = "..."` in the manifest).
-          sed -i -E "0,/^version = /{s/^version = \"[^\"]+\"/version = \"$VERSION\"/}" Cargo.toml
-
-          # Bump the example version shown in the README install snippet.
-          sed -i -E "s/cargo install capnprotols --locked --version [0-9]+\.[0-9]+\.[0-9]+/cargo install capnprotols --locked --version $VERSION/" README.md
-
-          if git diff --quiet Cargo.toml; then
-            echo "Cargo.toml unchanged — package.version is already $VERSION"
-            exit 1
-          fi
-          git diff Cargo.toml README.md
-
-      - name: Refresh Cargo.lock and run tests
-        run: |
-          cargo build --all-targets
-          cargo test
-
-      - name: Verify package
-        run: cargo publish -p capnprotols --allow-dirty --dry-run
-
-      - name: Commit, tag, and push
-        run: |
-          git commit -am "Release v$VERSION"
-          git tag -a "v$VERSION" -m "v$VERSION"
-          git push origin HEAD:${{ github.ref_name }}
-          git push origin "v$VERSION"
-
-      - name: Publish to crates.io
+      # cargo-release does the whole dance: bump [package].version, update
+      # Cargo.lock, rewrite the README install snippet (pre-release-replacements),
+      # run a verifying `cargo publish`, commit "Release vX.Y.Z", tag vX.Y.Z, push
+      # the commit and tag, and publish to crates.io. Config lives in
+      # [package.metadata.release] in Cargo.toml.
+      - name: Release
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p capnprotols
+        run: cargo release "$VERSION" --execute --no-confirm
 
       - name: Create GitHub release
         env:

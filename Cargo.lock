@@ -92,6 +92,7 @@ dependencies = [
  "anyhow",
  "capnp",
  "capnpc",
+ "cc",
  "dashmap",
  "ignore",
  "regex",
@@ -104,7 +105,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
- "tree-sitter-capnp",
 ]
 
 [[package]]
@@ -953,14 +953,6 @@ checksum = "e747b1f9b7b931ed39a548c1fae149101497de3c1fc8d9e18c62c1a66c683d3d"
 dependencies = [
  "cc",
  "regex",
-]
-
-[[package]]
-name = "tree-sitter-capnp"
-version = "1.5.0"
-dependencies = [
- "cc",
- "tree-sitter",
 ]
 
 [[package]]

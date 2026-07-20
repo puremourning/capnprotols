@@ -14,6 +14,9 @@ exclude = [
   "extension/**",
   ".github/**",
   ".claude/**",
+  # The grammar source of truth lives in this submodule; the generated parser is
+  # vendored into grammar/ (see scripts/vendor-grammar.sh) and published from there.
+  "vendor/**",
 ]
 
 default-run = "capnprotols"
@@ -43,9 +46,26 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 capnp = "0.25"
 tree-sitter = "0.20"
-tree-sitter-capnp = { path = "vendor/tree-sitter-capnp" }
 similar = "2"
 ignore = "0.4"
 
 [build-dependencies]
 capnpc = "0.25"
+cc = "1"
+
+# `cargo release` drives version bumps, tagging, and publishing (see
+# .github/workflows/release.yml). Tags stay `vX.Y.Z` and the README install
+# snippet is bumped automatically to match the released version.
+[package.metadata.release]
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+# The GitHub release is created by the workflow after the tag is pushed.
+publish = true
+push = true
+
+[[package.metadata.release.pre-release-replacements]]
+file = "README.md"
+search = 'cargo install capnprotols --locked --version [0-9]+\.[0-9]+\.[0-9]+'
+replace = "cargo install capnprotols --locked --version {{version}}"
+exactly = 1

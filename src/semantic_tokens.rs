@@ -92,17 +92,14 @@ fn capture_to_token(name: &str) -> Option<(u32, u32)> {
 fn highlights_query() -> &'static Query {
   static Q: OnceLock<Query> = OnceLock::new();
   Q.get_or_init(|| {
-    Query::new(
-      tree_sitter_capnp::language(),
-      tree_sitter_capnp::HIGHLIGHTS_QUERY,
-    )
-    .expect("tree-sitter-capnp HIGHLIGHTS_QUERY failed to compile")
+    Query::new(crate::grammar::language(), crate::grammar::HIGHLIGHTS_QUERY)
+      .expect("HIGHLIGHTS_QUERY failed to compile")
   })
 }
 
 pub fn parse(text: &str) -> Option<Tree> {
   let mut parser = Parser::new();
-  parser.set_language(tree_sitter_capnp::language()).ok()?;
+  parser.set_language(crate::grammar::language()).ok()?;
   parser.parse(text, None)
 }
 

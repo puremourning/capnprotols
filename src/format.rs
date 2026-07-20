@@ -738,7 +738,7 @@ fn leading_indent(line: &str) -> String {
 
 fn parse(text: &str) -> Option<tree_sitter::Tree> {
   let mut parser = tree_sitter::Parser::new();
-  parser.set_language(tree_sitter_capnp::language()).ok()?;
+  parser.set_language(crate::grammar::language()).ok()?;
   parser.parse(text, None)
 }
 
