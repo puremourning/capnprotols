@@ -958,8 +958,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-capnp"
 version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4589729e5d73a2121413a48691a2d24b33b6255c6579c241b7ad669942a2692b"
 dependencies = [
  "cc",
  "tree-sitter",

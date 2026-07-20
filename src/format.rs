@@ -756,6 +756,30 @@ mod tests {
     assert_eq!(fmt(src), None);
   }
 
+  // Regression: an annotation whose value is a list of identifiers (e.g. enum
+  // value names) used to trip a spurious parse error in the tree-sitter grammar,
+  // so the formatter bailed and returned None even though the schema is
+  // perfectly valid Cap'n Proto. A list of integer literals (`[1, 2]`) parsed
+  // fine; only the identifier form `[one, two]` failed. The grammar now parses
+  // both, so formatting must succeed and preserve the annotation list.
+  // See tests/fixtures/annotations.capnp.
+  #[test]
+  fn annotation_list_of_identifiers_formats() {
+    let src = concat!(
+      "@0xc9214ea7eb78b970;\n",
+      "enum E { one @0; two @1; }\n",
+      "annotation listof(struct) :List(E);\n",
+      "struct S $listof([one, two]) {\n",
+      "  foo @0 :Text;\n",
+      "}\n",
+    );
+    let out = fmt(src).expect("annotation-list schema should format, not bail");
+    assert!(
+      out.contains("$listof([one, two])"),
+      "annotation list not preserved:\n{out}"
+    );
+  }
+
   #[test]
   fn final_newline_added() {
     let src = "@0xeaf06436acd04fce;\nstruct A {\n  foo @0 :Text;\n}";

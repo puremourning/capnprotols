@@ -43,7 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 capnp = "0.25"
 tree-sitter = "0.20"
-tree-sitter-capnp = "1.5"
+tree-sitter-capnp = { path = "vendor/tree-sitter-capnp" }
 similar = "2"
 ignore = "0.4"
 

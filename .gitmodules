@@ -1,0 +1,4 @@
+[submodule "vendor/tree-sitter-capnp"]
+       path = vendor/tree-sitter-capnp
+       url = https://github.com/puremourning/tree-sitter-capnp
+
