@@ -65,7 +65,10 @@ jobs:
           submodules: recursive
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+      # The submodule's package-lock.json pins the exact tree-sitter CLI, so
+      # `npm ci` keeps `tree-sitter generate` reproducible without duplicating a
+      # version here.
       - name: Install pinned tree-sitter CLI
         working-directory: vendor/tree-sitter-capnp
         run: npm ci
