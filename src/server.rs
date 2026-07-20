@@ -16,11 +16,11 @@ use crate::index::{Index, NodeInfo, NodeKind};
 use crate::{aliases, compiler, diagnostics, ordinals, semantic_tokens};
 
 pub struct Backend {
-  client:       Client,
-  docs:         DocumentStore,
-  config:       Arc<RwLock<Config>>,
+  client: Client,
+  docs: DocumentStore,
+  config: Arc<RwLock<Config>>,
   /// Per-file symbol index, keyed by the file's URI.
-  indices:      Arc<DashMap<Url, Arc<Index>>>,
+  indices: Arc<DashMap<Url, Arc<Index>>>,
   /// Memoizes `.capnpfmtignore` lookups by parent directory across the
   /// server's lifetime. Consulted once per `did_open`; the resulting bool
   /// is then stashed on the `Document` so format requests are just a bool
@@ -93,7 +93,7 @@ impl Backend {
     let start = byte_to_position(&target_rope, alias.name_start_byte);
     let end = byte_to_position(&target_rope, alias.name_end_byte);
     Some(Location {
-      uri:   target_uri,
+      uri: target_uri,
       range: Range { start, end },
     })
   }
@@ -203,8 +203,8 @@ impl LanguageServer for Backend {
             cfg.resolution_roots,
         );
     Ok(InitializeResult {
-      server_info:  Some(ServerInfo {
-        name:    "capnprotols".to_string(),
+      server_info: Some(ServerInfo {
+        name: "capnprotols".to_string(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
       }),
       capabilities: ServerCapabilities {
@@ -215,18 +215,15 @@ impl LanguageServer for Backend {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
-          trigger_characters:         Some(vec![
-            "(".to_string(),
-            ",".to_string(),
-          ]),
-          retrigger_characters:       Some(vec![",".to_string()]),
+          trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+          retrigger_characters: Some(vec![",".to_string()]),
           work_done_progress_options: Default::default(),
         }),
         semantic_tokens_provider: Some(
           SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
               legend: SemanticTokensLegend {
-                token_types:     semantic_tokens::TOKEN_TYPES.to_vec(),
+                token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
                 token_modifiers: semantic_tokens::TOKEN_MODIFIERS.to_vec(),
               },
               full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -241,6 +238,9 @@ impl LanguageServer for Backend {
             ".".to_string(),
             "$".to_string(),
             "@".to_string(),
+            // Ordinal-range slots: `@[<here>` and `@[3,<here>`.
+            "[".to_string(),
+            ",".to_string(),
           ]),
           ..Default::default()
         }),
@@ -333,7 +333,7 @@ impl LanguageServer for Backend {
       if target_path.exists() {
         if let Ok(target_uri) = Url::from_file_path(&target_path) {
           return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri:   target_uri,
+            uri: target_uri,
             range: Range::default(),
           })));
         }
@@ -427,7 +427,7 @@ impl LanguageServer for Backend {
       )
     });
     Ok(Some(GotoDefinitionResponse::Scalar(Location {
-      uri:   target_uri,
+      uri: target_uri,
       range: Range { start, end },
     })))
   }
@@ -494,12 +494,12 @@ impl LanguageServer for Backend {
     let mut param_names: Vec<String> = Vec::new();
     let signature = if call.callee == "List" {
       Some(SignatureInformation {
-        label:            "List(T)".into(),
-        documentation:    Some(Documentation::String(
+        label: "List(T)".into(),
+        documentation: Some(Documentation::String(
           "List of T. Element type follows.".into(),
         )),
-        parameters:       Some(vec![ParameterInformation {
-          label:         ParameterLabel::Simple("T".into()),
+        parameters: Some(vec![ParameterInformation {
+          label: ParameterLabel::Simple("T".into()),
           documentation: None,
         }]),
         active_parameter: Some(0),
@@ -565,7 +565,7 @@ impl LanguageServer for Backend {
     };
     signature.active_parameter = Some(active);
     Ok(Some(SignatureHelp {
-      signatures:       vec![signature],
+      signatures: vec![signature],
       active_signature: Some(0),
       active_parameter: Some(active),
     }))
@@ -647,10 +647,10 @@ impl LanguageServer for Backend {
     }
     Ok(Some(Hover {
       contents: HoverContents::Markup(MarkupContent {
-        kind:  MarkupKind::Markdown,
+        kind: MarkupKind::Markdown,
         value: md,
       }),
-      range:    None,
+      range: None,
     }))
   }
 
@@ -711,7 +711,7 @@ impl LanguageServer for Backend {
           let mut items: Vec<CompletionItem> = index
             .candidates_in_file(&target)
             .into_iter()
-            .map(node_completion_item)
+            .map(|n| node_completion_item(n, &None))
             .collect();
           if let Ok(target_text) = std::fs::read_to_string(&target) {
             for decl in aliases::scan_top_level(&target_text) {
@@ -774,15 +774,54 @@ impl LanguageServer for Backend {
       CursorContext::None => return Ok(None),
     };
 
+    // When completing a type into an empty `@[] :` slot, we can fill the brackets with a
+    // correctly-sized ordinal range for group/union newtypes. Compute the target bracket
+    // span and the first free ordinal once; each newtype item then carries its own range
+    // (sized by that newtype's field count) as an additionalTextEdit.
+    let range_autofill: Option<(Range, u32)> =
+      if matches!(ctx, CursorContext::Type) {
+        empty_ordinal_range_slot(&text, byte).and_then(|(s, e)| {
+          let start =
+            ordinals::suggest_ordinals_at(&text, byte).last().copied()?;
+          let range =
+            Range::new(byte_to_position(&rope, s), byte_to_position(&rope, e));
+          Some((range, start))
+        })
+      } else {
+        None
+      };
+
     let mut items: Vec<CompletionItem> = prelude;
-    items.extend(candidates.into_iter().map(node_completion_item));
+    items.extend(
+      candidates
+        .into_iter()
+        .map(|n| node_completion_item(n, &range_autofill)),
+    );
     Ok(Some(CompletionResponse::Array(items)))
   }
 }
 
 /// Completion item for an indexed node. `detail` is the declaration signature, so the
 /// list says what the thing is and what it takes rather than which file it came from.
-fn node_completion_item(n: &NodeInfo) -> CompletionItem {
+fn node_completion_item(
+  n: &NodeInfo,
+  range_autofill: &Option<(Range, u32)>,
+) -> CompletionItem {
+  let additional_text_edits =
+    match (&range_autofill, n.kind, n.newtype_ordinals) {
+      (Some((range, start)), NodeKind::NewType, Some(count)) if count > 0 => {
+        let fill = if count == 1 {
+          start.to_string()
+        } else {
+          format!("{}-{}", start, start + count - 1)
+        };
+        Some(vec![TextEdit {
+          range: *range,
+          new_text: fill,
+        }])
+      }
+      _ => None,
+    };
   CompletionItem {
     label: n.short_name.clone(),
     kind: Some(match n.kind {
@@ -797,10 +836,11 @@ fn node_completion_item(n: &NodeInfo) -> CompletionItem {
     detail: Some(n.signature()),
     documentation: n.doc_comment.as_ref().map(|d| {
       Documentation::MarkupContent(MarkupContent {
-        kind:  MarkupKind::Markdown,
+        kind: MarkupKind::Markdown,
         value: d.clone(),
       })
     }),
+    additional_text_edits,
     ..Default::default()
   }
 }
@@ -822,7 +862,7 @@ fn decl_completion_item(d: aliases::TopLevelDecl) -> CompletionItem {
     detail: Some(d.signature),
     documentation: d.doc_comment.map(|doc| {
       Documentation::MarkupContent(MarkupContent {
-        kind:  MarkupKind::Markdown,
+        kind: MarkupKind::Markdown,
         value: doc,
       })
     }),
@@ -937,12 +977,12 @@ fn resolve_target_file(
 /// the cursor. `callee` is the dotted name (e.g. `Json.discriminator`, `List`, or `Map`),
 /// `active_parameter` is the comma index of the cursor inside the parens.
 struct EnclosingCall {
-  callee:           String,
+  callee: String,
   active_parameter: u32,
   /// The `name` in `name = value` for the argument the cursor sits in, when the user has
   /// already typed the `=`. Cap'n Proto's struct-valued annotations take named arguments
   /// in any order, so the comma index alone would highlight the wrong field.
-  arg_name:         Option<String>,
+  arg_name: Option<String>,
 }
 
 fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
@@ -1042,7 +1082,7 @@ fn build_field_signature(
     }
     let end = label.len() as u32;
     params.push(ParameterInformation {
-      label:         ParameterLabel::LabelOffsets([start, end]),
+      label: ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -1071,7 +1111,7 @@ fn build_value_signature(
     label,
     documentation: None,
     parameters: Some(vec![ParameterInformation {
-      label:         ParameterLabel::LabelOffsets([start, end]),
+      label: ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     }]),
     active_parameter: None,
@@ -1093,7 +1133,7 @@ fn build_generic_signature(
     label.push_str(p);
     let end = label.len() as u32;
     out.push(ParameterInformation {
-      label:         ParameterLabel::LabelOffsets([start, end]),
+      label: ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -1152,7 +1192,7 @@ fn line_diff_edits(old: &str, new: &str) -> Vec<TextEdit> {
     edits.push(TextEdit {
       range: Range {
         start: Position::new(s, 0),
-        end:   Position::new(end, 0),
+        end: Position::new(end, 0),
       },
       new_text,
     });
@@ -1307,6 +1347,25 @@ fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
     if k > 0 && bytes[k - 1] == b'@' {
       return CursorContext::FieldOrdinal;
     }
+    // Ordinal-range slot: the cursor is inside `@[…]`, e.g. `@[0, 2-|` or `@[1, |]`.
+    // Walk back over the range's interior tokens (digits, separators, whitespace); if
+    // that run opens with `@[`, we're placing another mapped ordinal, so suggest the
+    // next free one just like after a bare `@`.
+    let mut r = cursor;
+    while r > 0
+      && matches!(bytes[r - 1], b'0'..=b'9' | b' ' | b'\t' | b',' | b'-')
+    {
+      r -= 1;
+    }
+    if r >= 2 && bytes[r - 1] == b'[' && bytes[r - 2] == b'@' {
+      return CursorContext::FieldOrdinal;
+    }
+  }
+  // A bare `[` that isn't `@[` (a const list `[1, 2]` or annotation array `[…]`) is not a
+  // type/keyword slot — now that `[` is a trigger character, suppress rather than pop noise
+  // there. The `@[` ordinal case already returned above.
+  if cursor >= 1 && bytes[cursor - 1] == b'[' {
+    return CursorContext::None;
   }
   // Skip the identifier currently being typed.
   let mut i = cursor;
@@ -1347,6 +1406,54 @@ fn completion_context(text: &str, cursor: usize) -> CursorContext<'_> {
     }
     _ => CursorContext::Unknown,
   }
+}
+
+/// If the cursor sits in the type slot of a field whose ordinal is an *empty* range
+/// (`name @[] :Type`), return the byte span of the bracket interior (between `[` and `]`)
+/// so it can be filled in with a correctly-sized ordinal range. Returns `None` if the
+/// range already has content, or the field doesn't use the `@[…]` form at all.
+fn empty_ordinal_range_slot(
+  text: &str,
+  cursor: usize,
+) -> Option<(usize, usize)> {
+  let b = text.as_bytes();
+  let mut i = cursor.min(b.len());
+  // Skip the partial type name being typed (identifier chars + namespace dots).
+  while i > 0
+    && (b[i - 1].is_ascii_alphanumeric()
+      || b[i - 1] == b'_'
+      || b[i - 1] == b'.')
+  {
+    i -= 1;
+  }
+  let skip_ws = |mut j: usize| {
+    while j > 0 && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+      j -= 1;
+    }
+    j
+  };
+  i = skip_ws(i);
+  // The type slot must be introduced by `:`.
+  if i == 0 || b[i - 1] != b':' {
+    return None;
+  }
+  i = skip_ws(i - 1);
+  // …preceded by the closing `]` of the ordinal range.
+  if i == 0 || b[i - 1] != b']' {
+    return None;
+  }
+  let close = i - 1;
+  // Walk back over the (whitespace-only) interior to the opening `[`.
+  let open = skip_ws(close);
+  if open == 0 || b[open - 1] != b'[' {
+    return None; // interior wasn't empty, or there's no `[`
+  }
+  let bracket = open - 1;
+  // …which must be an `@[` ordinal-range opener.
+  if bracket == 0 || b[bracket - 1] != b'@' {
+    return None;
+  }
+  Some((bracket + 1, close))
 }
 
 /// If `byte` falls inside a `"..."` string that's the operand of an `import` keyword,
