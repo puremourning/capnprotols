@@ -51,11 +51,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -Dwarnings
 
-  # grammar/ is vendored from the vendor/tree-sitter-capnp submodule by
-  # scripts/vendor-grammar.sh: the generated parser.c, the highlights query, and
-  # the grammar's LICENSE. Regenerate parser.c from the pinned tree-sitter CLI,
-  # re-run the vendor script, and fail if anything under grammar/ has drifted — so
-  # grammar or query edits can never land without the vendored copies being updated.
+  # grammar/ is a copy of the pinned vendor/tree-sitter-capnp submodule's committed
+  # sources (parser.c, highlights.scm, LICENSE), produced by scripts/vendor-grammar.sh.
+  # Re-run the copy and fail if anything under grammar/ drifts, so bumping the
+  # submodule can never land without the vendored copies being refreshed.
+  #
+  # Note: we do NOT regenerate parser.c from grammar.js here. `tree-sitter generate`
+  # is not byte-reproducible across platforms (state numbering differs), and keeping
+  # parser.c in sync with grammar.js is the grammar repo's own CI responsibility. We
+  # only assert that our vendored copy matches the submodule commit we pin.
   grammar:
     name: grammar in sync
     runs-on: ubuntu-latest
@@ -63,27 +67,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      # The submodule's package-lock.json pins the exact tree-sitter CLI, so
-      # `npm ci` keeps `tree-sitter generate` reproducible without duplicating a
-      # version here.
-      - name: Install pinned tree-sitter CLI
-        working-directory: vendor/tree-sitter-capnp
-        run: npm ci
-      - name: Regenerate parser from grammar.js
-        working-directory: vendor/tree-sitter-capnp
-        # Only `tree-sitter generate` touches parser.c; `npm run build` additionally
-        # runs node-gyp, which needs a native toolchain and is irrelevant here.
-        # highlights.scm and LICENSE are static — the vendor script re-copies them.
-        run: ./node_modules/.bin/tree-sitter generate
       - name: Re-vendor into grammar/ (parser.c, highlights.scm, LICENSE)
         run: ./scripts/vendor-grammar.sh
       - name: Fail if the vendored grammar has drifted
         run: |
           if ! git diff --exit-code -- grammar/; then
-            echo "::error::grammar/ is out of sync with vendor/tree-sitter-capnp." \
-                 "Run scripts/vendor-grammar.sh and commit the result."
+            echo "::error::grammar/ is out of sync with the vendor/tree-sitter-capnp" \
+                 "submodule. Run scripts/vendor-grammar.sh and commit the result."
             exit 1
           fi
