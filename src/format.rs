@@ -452,6 +452,19 @@ fn separator(
     };
   }
 
+  // `->` — space on both sides. Checked before the paren rule so `-> (b :Int32)` and
+  // `-> ()` keep their space.
+  if t == "->" || p == "->" {
+    return Sep::Space;
+  }
+
+  // `(` after an ordinal or unique id (`@0`, `@0!`, `@0x…`) — one space. The `@…` binds
+  // to the name before it, not to the list that follows, so
+  // `annotation foo @0x… (struct)` and `method @0 (params)` read correctly.
+  if t == "(" && p.starts_with('@') {
+    return Sep::Space;
+  }
+
   // `.` and `(`, `[` — no space around (no space before `(` for calls/generics either).
   if matches!(t, "(" | "[" | ".") {
     return Sep::None;
@@ -469,11 +482,6 @@ fn separator(
   // (handled by default rule).
   if p == "$" {
     return Sep::None;
-  }
-
-  // `->` — space on both sides.
-  if t == "->" || p == "->" {
-    return Sep::Space;
   }
 
   // Default: single space.
@@ -816,6 +824,34 @@ mod tests {
         "got {out:?} for input {input:?}"
       );
     }
+  }
+
+  #[test]
+  fn space_between_unique_id_and_annotation_targets() {
+    // Reported by user: the id was glued to the target list, which read as if the
+    // targets belonged to the id. Without an id there is no space (the targets bind
+    // to the name), matching capnp's own c++.capnp.
+    let src = "@0xeaf06436acd04fd1;\nannotation foo @0x9789034b5fb42d27(struct) :Text;\nannotation bar (struct) :Text;\n";
+    let out = fmt(src).expect("formatted");
+    assert!(
+      out.contains("annotation foo @0x9789034b5fb42d27 (struct) :Text;"),
+      "id glued to targets:\n{out}"
+    );
+    assert!(
+      out.contains("annotation bar(struct) :Text;"),
+      "unexpected space after annotation name:\n{out}"
+    );
+  }
+
+  #[test]
+  fn method_ordinal_and_arrow_spacing() {
+    let src = "@0xeaf06436acd04fd1;\ninterface I {\n  m @0(a :Int32) ->(b :Int32);\n  n @1!() -> ();\n}\n";
+    let out = fmt(src).expect("formatted");
+    assert!(
+      out.contains("m @0 (a :Int32) -> (b :Int32);"),
+      "method spacing wrong:\n{out}"
+    );
+    assert!(out.contains("n @1! () -> ();"), "method spacing wrong:\n{out}");
   }
 
   #[test]
