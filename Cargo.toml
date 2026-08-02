@@ -21,6 +21,23 @@ exclude = [
 
 default-run = "capnprotols"
 
+# `cargo release` drives version bumps, tagging, and publishing (see
+# .github/workflows/release.yml). Tags stay `vX.Y.Z` and the README install
+# snippet is bumped automatically to match the released version.
+[package.metadata.release]
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release v{{version}}"
+# The GitHub release is created by the workflow after the tag is pushed.
+publish = true
+push = true
+
+[[package.metadata.release.pre-release-replacements]]
+file = "README.md"
+search = 'cargo install capnprotols --locked --version [0-9]+\.[0-9]+\.[0-9]+'
+replace = "cargo install capnprotols --locked --version {{version}}"
+exactly = 1
+
 [lib]
 name = "capnprotols"
 path = "src/lib.rs"
@@ -44,7 +61,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
-capnp = "0.26"
+capnp = "0.27.0-alpha"
 tree-sitter = "0.20"
 similar = "2"
 ignore = "0.4"
@@ -57,21 +74,4 @@ cc = "1"
 # carries the `Node.type` union variant. Drop this section once a `capnp` release
 # on crates.io includes newtype support — nothing else has to change.
 [patch.crates-io]
-capnp = { git = "https://github.com/puremourning/capnproto-rust", branch = "newtype" }
-
-# `cargo release` drives version bumps, tagging, and publishing (see
-# .github/workflows/release.yml). Tags stay `vX.Y.Z` and the README install
-# snippet is bumped automatically to match the released version.
-[package.metadata.release]
-allow-branch = ["main"]
-tag-name = "v{{version}}"
-pre-release-commit-message = "Release v{{version}}"
-# The GitHub release is created by the workflow after the tag is pushed.
-publish = true
-push = true
-
-[[package.metadata.release.pre-release-replacements]]
-file = "README.md"
-search = 'cargo install capnprotols --locked --version [0-9]+\.[0-9]+\.[0-9]+'
-replace = "cargo install capnprotols --locked --version {{version}}"
-exactly = 1
+capnp = { git = "https://github.com/puremourning/capnproto-rust", branch = "newtype", package = "capnp" }
