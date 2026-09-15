@@ -221,6 +221,49 @@ LSP client that launches the `capnprotols` binary. See its
   (type / annotation / member / field-ordinal slots) for completion and
   signature help.
 
+## Releasing
+
+`capnprotols` follows [SemVer](https://semver.org). While the crate is on
+`0.x`, breaking changes bump the minor version (`0.1.0` → `0.2.0`) and
+backward-compatible changes bump the patch version (`0.1.0` → `0.1.1`).
+
+Releases are cut by the [`Release`](.github/workflows/release.yml) workflow.
+To publish a new version:
+
+1. Make sure `main` is green on CI and contains everything you want in the
+   release. In particular the `grammar in sync` job must be passing — the
+   published crate ships the vendored `grammar/` copy, not the
+   `vendor/tree-sitter-capnp` submodule, which is excluded from the package.
+2. From the GitHub **Actions** tab, run **Release** via *Run workflow* and
+   enter either an explicit version (e.g. `0.3.0`, no `v` prefix) or a bump
+   level (`patch`, `minor`, `major`).
+
+The workflow then:
+
+- runs `cargo test`;
+- bumps `version` in [`Cargo.toml`](Cargo.toml), refreshes `Cargo.lock`, and
+  rewrites the pinned `cargo install` snippet in this README;
+- runs a verifying `cargo publish` as a sanity check;
+- commits the bump as `Release vX.Y.Z`, tags `vX.Y.Z`, and pushes both;
+- publishes to [crates.io](https://crates.io/crates/capnprotols);
+- creates a GitHub release with auto-generated notes.
+
+Branch and version validation live in `[package.metadata.release]` in
+`Cargo.toml` — `allow-branch = ["main"]` is what keeps releases to `main`,
+and `cargo release` rejects a version or bump level it can't parse.
+
+docs.rs picks up the new version from crates.io automatically — give it a few
+minutes and check <https://docs.rs/capnprotols>.
+
+### Required setup
+
+- `CARGO_REGISTRY_TOKEN` repository secret — a crates.io API token from
+  <https://crates.io/me>, scoped to `publish-update` for `capnprotols`.
+- The default `GITHUB_TOKEN` is enough for the commit/tag push and release
+  creation, provided `main` doesn't have branch protection that blocks pushes
+  from `github-actions[bot]`. If it does, either relax the rule for the bot or
+  swap in a fine-grained PAT.
+
 ## License
 
 MIT.
