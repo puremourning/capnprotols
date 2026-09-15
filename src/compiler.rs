@@ -20,13 +20,27 @@ pub struct CompileOutput {
   pub overlay_path: Option<PathBuf>,
 }
 
-/// Run `capnp compile -o- <file>` against an on-disk path. We feed the current buffer
-/// contents via a temp file rather than stdin because `capnp` resolves imports relative
-/// to the file's directory.
+/// A schema to compile *alongside* the main file. capnp prunes an imported file's nodes
+/// down to just what the importer references, so anything the user hasn't written yet is
+/// missing from the index — naming the import on the command line as well makes the
+/// compiler emit its complete node set.
+#[derive(Debug, Clone)]
+pub struct ExtraFile {
+  /// The import root the file was found under (e.g. `/usr/local/include`). Passed as
+  /// `--src-prefix` so capnp reports the file under its import name rather than its
+  /// on-disk path — without it capnp warns that one source maps to two paths.
+  pub src_prefix: Option<PathBuf>,
+  pub path:       PathBuf,
+}
+
+/// Run `capnp compile -o- <file> [extra…]` against an on-disk path. We feed the current
+/// buffer contents via a temp file rather than stdin because `capnp` resolves imports
+/// relative to the file's directory.
 pub async fn compile_file(
   config: &Config,
   file_path: &Path,
   overlay_text: Option<&str>,
+  extra_files: &[ExtraFile],
 ) -> Result<CompileOutput> {
   let (path_to_compile, _tmp, overlay_path) = match overlay_text {
     Some(text) => {
@@ -56,6 +70,12 @@ pub async fn compile_file(
     cmd.arg("-I").arg(inc);
   }
   cmd.arg(&path_to_compile);
+  for extra in extra_files {
+    if let Some(prefix) = &extra.src_prefix {
+      cmd.arg("--src-prefix").arg(prefix);
+    }
+    cmd.arg(&extra.path);
+  }
   cmd
     .stdin(Stdio::null())
     .stdout(Stdio::piped())

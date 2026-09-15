@@ -42,6 +42,65 @@ pub struct NodeInfo {
   /// For annotation nodes, the typeId of the value type (typically a struct whose fields
   /// are the named arguments at the application site).
   pub annotation_value_type: Option<u64>,
+  /// For annotation nodes, the rendered value type (`Text`, `List(UInt32)`, `Opts`, …).
+  pub annotation_type_str:   Option<String>,
+  /// For annotation nodes, the declaration targets (`struct`, `field`, …), in the order
+  /// capnp declares them. A single `*` when every target is allowed.
+  pub annotation_targets:    Vec<String>,
+  /// For const nodes, the rendered type (`UInt64`, `Text`, …).
+  pub const_type_str:        Option<String>,
+}
+
+impl NodeInfo {
+  /// One-line declaration signature, used as the `detail` on completion items. This is
+  /// what the declaration looks like in source — `annotation flatten(field) :Void`,
+  /// `struct Map(Key, Value)`, `const maxAge :UInt32` — so the completion list answers
+  /// "what is this and what does it take?" rather than "which file is it in".
+  ///
+  /// Falls back to the bare name when we have nothing type-ish to add (the compiler
+  /// gives us no type for enums, and nested nodes carry no parameters of their own).
+  pub fn signature(&self) -> String {
+    let name = if self.short_name.is_empty() {
+      self.display_name.as_str()
+    } else {
+      self.short_name.as_str()
+    };
+    match self.kind {
+      NodeKind::Annotation => {
+        let mut out = format!("annotation {name}");
+        if !self.annotation_targets.is_empty() {
+          out.push('(');
+          out.push_str(&self.annotation_targets.join(", "));
+          out.push(')');
+        }
+        if let Some(ty) = &self.annotation_type_str {
+          out.push_str(" :");
+          out.push_str(ty);
+        }
+        out
+      }
+      NodeKind::Const => match &self.const_type_str {
+        Some(ty) => format!("const {name} :{ty}"),
+        None => format!("const {name}"),
+      },
+      NodeKind::Struct => format!("struct {name}{}", self.params_suffix()),
+      NodeKind::Interface => {
+        format!("interface {name}{}", self.params_suffix())
+      }
+      NodeKind::Enum => format!("enum {name}"),
+      NodeKind::File => format!("file {}", self.display_name),
+      NodeKind::Other => name.to_string(),
+    }
+  }
+
+  /// `(T, U)` for a generic type, empty otherwise.
+  fn params_suffix(&self) -> String {
+    if self.parameters.is_empty() {
+      String::new()
+    } else {
+      format!("({})", self.parameters.join(", "))
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +194,9 @@ impl Index {
       }
       let mut fields: Vec<FieldInfo> = Vec::new();
       let mut annotation_value_type: Option<u64> = None;
+      let mut annotation_type_str: Option<String> = None;
+      let mut annotation_targets: Vec<String> = Vec::new();
+      let mut const_type_str: Option<String> = None;
       use schema_capnp::node::Which as NodeWhich;
       let kind = match node.which() {
         Ok(NodeWhich::File(())) => NodeKind::File,
@@ -154,10 +216,16 @@ impl Index {
         }
         Ok(NodeWhich::Enum(_)) => NodeKind::Enum,
         Ok(NodeWhich::Interface(_)) => NodeKind::Interface,
-        Ok(NodeWhich::Const(_)) => NodeKind::Const,
+        Ok(NodeWhich::Const(c)) => {
+          const_type_str =
+            Some(render_type(&c.get_type()?, &display_name_by_id));
+          NodeKind::Const
+        }
         Ok(NodeWhich::Annotation(a)) => {
           let ty = a.get_type()?;
           annotation_value_type = type_target_id(&ty);
+          annotation_type_str = Some(render_type(&ty, &display_name_by_id));
+          annotation_targets = annotation_targets_of(&a);
           NodeKind::Annotation
         }
         _ => NodeKind::Other,
@@ -185,6 +253,9 @@ impl Index {
           parameters,
           fields,
           annotation_value_type,
+          annotation_type_str,
+          annotation_targets,
+          const_type_str,
         },
       );
     }
@@ -454,6 +525,36 @@ fn render_type(
     Ok(AnyPointer(_)) => "AnyPointer".into(),
     Err(_) => "?".into(),
   }
+}
+
+/// The `(struct, field, …)` target list from an annotation declaration, in the order
+/// capnp's language reference lists them. Collapses to `["*"]` when every target is
+/// allowed, matching the `annotation foo(*)` source form.
+fn annotation_targets_of(
+  a: &schema_capnp::node::annotation::Reader,
+) -> Vec<String> {
+  let all = [
+    ("file", a.get_targets_file()),
+    ("const", a.get_targets_const()),
+    ("enum", a.get_targets_enum()),
+    ("enumerant", a.get_targets_enumerant()),
+    ("struct", a.get_targets_struct()),
+    ("field", a.get_targets_field()),
+    ("union", a.get_targets_union()),
+    ("group", a.get_targets_group()),
+    ("interface", a.get_targets_interface()),
+    ("method", a.get_targets_method()),
+    ("param", a.get_targets_param()),
+    ("annotation", a.get_targets_annotation()),
+  ];
+  if all.iter().all(|(_, on)| *on) {
+    return vec!["*".to_string()];
+  }
+  all
+    .iter()
+    .filter(|(_, on)| *on)
+    .map(|(name, _)| name.to_string())
+    .collect()
 }
 
 fn name_or_id(names: &HashMap<u64, String>, id: u64) -> String {
