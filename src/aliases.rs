@@ -71,6 +71,10 @@ pub fn find<'a>(
 pub struct TopLevelDecl {
   pub kind:        DeclKind,
   pub name:        String,
+  /// The declaration head as written, minus the unique id and the value/body —
+  /// `annotation flatten(field) :FlattenOptions`. Mirrors `NodeInfo::signature` so
+  /// completion details read the same whether or not the file made it into the index.
+  pub signature:   String,
   pub doc_comment: Option<String>,
 }
 
@@ -126,8 +130,55 @@ pub fn scan_top_level(src: &str) -> Vec<TopLevelDecl> {
     out.push(TopLevelDecl {
       kind,
       name,
+      signature: decl_signature(line),
       doc_comment: doc,
     });
+  }
+  out
+}
+
+/// Reduce a declaration line to its signature: drop any trailing comment, the body or
+/// value (everything from `{` or the first `=`), the terminating `;`, and the `@0x…`
+/// unique id, then tidy the whitespace the id left behind.
+///
+/// Declarations that wrap onto a second line simply yield the part on the first — a
+/// truncated signature still beats no signature at all.
+fn decl_signature(line: &str) -> String {
+  use std::sync::OnceLock;
+  static R: OnceLock<Regex> = OnceLock::new();
+  let id_re = R.get_or_init(|| Regex::new(r"@0[xX][0-9a-fA-F_]+\s*").unwrap());
+
+  let head = line.split('#').next().unwrap_or(line);
+  let head = head.split('{').next().unwrap_or(head);
+  let head = head.split('=').next().unwrap_or(head);
+  let head = head.trim().trim_end_matches(';').trim_end();
+  let stripped = id_re.replace_all(head, "");
+  // `annotation foo (field)` -> `annotation foo(field)`, and collapse the runs of
+  // whitespace that padded the id.
+  let mut out = String::with_capacity(stripped.len());
+  for word in stripped.split_whitespace() {
+    if !out.is_empty() && !word.starts_with('(') {
+      out.push(' ');
+    }
+    out.push_str(word);
+  }
+  out
+}
+
+/// Every `import "PATH"` in the file, in source order and deduplicated. Covers all three
+/// spellings — `using X = import "..."`, `using import "...".Y` and `$import "..."` —
+/// since they share the `import "…"` token.
+pub fn imported_paths(src: &str) -> Vec<String> {
+  use std::sync::OnceLock;
+  static R: OnceLock<Regex> = OnceLock::new();
+  let re = R.get_or_init(|| Regex::new(r#"\bimport\s+"([^"]+)""#).unwrap());
+  let cleaned = strip_comments(src);
+  let mut out: Vec<String> = Vec::new();
+  for c in re.captures_iter(&cleaned) {
+    let path = c[1].to_string();
+    if !out.contains(&path) {
+      out.push(path);
+    }
   }
   out
 }
@@ -173,5 +224,54 @@ mod tests {
     let a = scan(src);
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].name, "Real");
+  }
+
+  #[test]
+  fn imported_paths_finds_every_import_form() {
+    let src = concat!(
+      "using Json = import \"/capnp/compat/json.capnp\";\n",
+      "using import \"sibling.capnp\".Thing;\n",
+      "$import \"/capnp/c++.capnp\".namespace(\"foo\");\n",
+      "# using Ignored = import \"commented.capnp\";\n",
+      "using Again = import \"/capnp/compat/json.capnp\";\n",
+    );
+    assert_eq!(
+      imported_paths(src),
+      vec![
+        "/capnp/compat/json.capnp",
+        "sibling.capnp",
+        "/capnp/c++.capnp",
+      ]
+    );
+  }
+
+  // The surface scanner is what feeds completion `detail` for imported files the
+  // compiler pruned out of the CodeGeneratorRequest, so its signatures have to read
+  // like the ones we build from the index: no unique id, no body, no value.
+  #[test]
+  fn scan_top_level_renders_signatures() {
+    let src = concat!(
+      "annotation flatten @0x82d3e852af0336bf (field, group, union) :FlattenOptions;\n",
+      "annotation name @0xfa5afd9a7cbb0e2b (field, enumerant) :Text;\n",
+      "struct FlattenOptions @0x40e7bbe0d0454b95 {\n",
+      "const maxAge :UInt32 = 3600;  # seconds\n",
+      "struct Map(Key, Value) {\n",
+      "using Json = import \"/capnp/compat/json.capnp\";\n",
+    );
+    let sigs: Vec<String> = scan_top_level(src)
+      .into_iter()
+      .map(|d| d.signature)
+      .collect();
+    assert_eq!(
+      sigs,
+      vec![
+        "annotation flatten(field, group, union) :FlattenOptions",
+        "annotation name(field, enumerant) :Text",
+        "struct FlattenOptions",
+        "const maxAge :UInt32",
+        "struct Map(Key, Value)",
+        "using Json",
+      ]
+    );
   }
 }

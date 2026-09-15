@@ -108,7 +108,9 @@ impl Backend {
     };
     let config = self.config.read().await.clone();
     debug!("refresh: compiling {}", path.display());
-    let result = compiler::compile_file(&config, &path, Some(&text)).await;
+    let extra = imported_files(&text, &path, &config);
+    let result =
+      compiler::compile_file(&config, &path, Some(&text), &extra).await;
     // Strategy: always update diagnostics, but only replace the cached symbol index
     // when we got a usable CGR. On compile failure we keep the previous index so
     // completion/goto/hover stay useful while the user has a syntax error mid-edit
@@ -487,6 +489,9 @@ impl LanguageServer for Backend {
     //   1. Builtin generic: `List` (one type param)
     //   2. Index lookup by leaf name: annotation -> use its value-struct's fields;
     //      struct/interface -> use its generic parameters.
+    // Parameter names travel alongside the signature so a `name = ` argument can
+    // highlight the field it binds rather than whatever sits at that comma index.
+    let mut param_names: Vec<String> = Vec::new();
     let signature = if call.callee == "List" {
       Some(SignatureInformation {
         label:            "List(T)".into(),
@@ -515,19 +520,31 @@ impl LanguageServer for Backend {
       let Some(node) = node else { return Ok(None) };
       match node.kind {
         NodeKind::Annotation => {
-          match node.annotation_value_type.and_then(|id| index.node(id)) {
-            Some(value_node) if !value_node.fields.is_empty() => {
-              Some(build_field_signature(
-                &format!("${}", call.callee),
-                &value_node.fields,
-              ))
+          let label = format!("${}", call.callee);
+          let value_struct = node
+            .annotation_value_type
+            .and_then(|id| index.node(id))
+            .filter(|v| v.kind == NodeKind::Struct && !v.fields.is_empty());
+          match value_struct {
+            // Struct-valued: the application site takes that struct's fields as
+            // named arguments, e.g. `$ann(name = "x", count = 1)`.
+            Some(value_node) => {
+              param_names =
+                value_node.fields.iter().map(|f| f.name.clone()).collect();
+              Some(build_field_signature(&label, &value_node.fields))
             }
-            _ => None,
+            // Everything else — a primitive, list, enum, interface or field-less
+            // struct — takes one positional value of the annotation's own type.
+            None => node
+              .annotation_type_str
+              .as_deref()
+              .map(|ty| build_value_signature(&label, ty)),
           }
         }
         NodeKind::Struct | NodeKind::Interface
           if !node.parameters.is_empty() =>
         {
+          param_names = node.parameters.clone();
           Some(build_generic_signature(&call.callee, &node.parameters))
         }
         _ => None,
@@ -538,7 +555,14 @@ impl LanguageServer for Backend {
       return Ok(None);
     };
     let n = signature.parameters.as_ref().map_or(0, |p| p.len()) as u32;
-    let active = call.active_parameter.min(n.saturating_sub(1));
+    let active = match call
+      .arg_name
+      .as_deref()
+      .and_then(|name| param_names.iter().position(|p| p == name))
+    {
+      Some(i) => i as u32,
+      None => call.active_parameter.min(n.saturating_sub(1)),
+    };
     signature.active_parameter = Some(active);
     Ok(Some(SignatureHelp {
       signatures:       vec![signature],
@@ -679,45 +703,24 @@ impl LanguageServer for Backend {
             std::path::PathBuf::from(import_path.trim_start_matches('/'));
           let target =
             resolve_target_file(&reported, &path, &config.resolution_roots);
-          let from_index = index.candidates_in_file(&target);
-          if !from_index.is_empty() {
-            from_index
-          } else if let Ok(target_text) = std::fs::read_to_string(&target) {
-            // Imported file isn't in our CGR (nothing from it survived).
-            // Fall back to a surface-text scan of its top-level declarations.
-            return Ok(Some(CompletionResponse::Array(
-              aliases::scan_top_level(&target_text)
-                .into_iter()
-                .map(|d| CompletionItem {
-                  label: d.name,
-                  kind: Some(match d.kind {
-                    aliases::DeclKind::Struct
-                    | aliases::DeclKind::Interface => {
-                      CompletionItemKind::STRUCT
-                    }
-                    aliases::DeclKind::Enum => CompletionItemKind::ENUM,
-                    aliases::DeclKind::Annotation => {
-                      CompletionItemKind::INTERFACE
-                    }
-                    aliases::DeclKind::Const => CompletionItemKind::CONSTANT,
-                    aliases::DeclKind::Using => {
-                      CompletionItemKind::TYPE_PARAMETER
-                    }
-                  }),
-                  detail: Some(format!("from {}", target.display())),
-                  documentation: d.doc_comment.map(|d| {
-                    Documentation::MarkupContent(MarkupContent {
-                      kind:  MarkupKind::Markdown,
-                      value: d,
-                    })
-                  }),
-                  ..Default::default()
-                })
-                .collect(),
-            )));
-          } else {
-            Vec::new()
+          // Two sources, neither complete on its own: the index knows the compiled
+          // types but not `using` aliases (capnp resolves those away, and they never
+          // become nodes), while the surface scan sees every top-level declaration but
+          // no types. Take the index entries and fold in whatever names it missed.
+          let mut items: Vec<CompletionItem> = index
+            .candidates_in_file(&target)
+            .into_iter()
+            .map(node_completion_item)
+            .collect();
+          if let Ok(target_text) = std::fs::read_to_string(&target) {
+            for decl in aliases::scan_top_level(&target_text) {
+              if items.iter().any(|i| i.label == decl.name) {
+                continue;
+              }
+              items.push(decl_completion_item(decl));
+            }
           }
+          return Ok(Some(CompletionResponse::Array(items)));
         } else {
           Vec::new()
         }
@@ -771,25 +774,56 @@ impl LanguageServer for Backend {
     };
 
     let mut items: Vec<CompletionItem> = prelude;
-    items.extend(candidates.into_iter().map(|n| CompletionItem {
-      label: n.short_name.clone(),
-      kind: Some(match n.kind {
-        NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
-        NodeKind::Enum => CompletionItemKind::ENUM,
-        NodeKind::Annotation => CompletionItemKind::INTERFACE,
-        NodeKind::Const => CompletionItemKind::CONSTANT,
-        _ => CompletionItemKind::TEXT,
-      }),
-      detail: Some(n.display_name.clone()),
-      documentation: n.doc_comment.as_ref().map(|d| {
-        Documentation::MarkupContent(MarkupContent {
-          kind:  MarkupKind::Markdown,
-          value: d.clone(),
-        })
-      }),
-      ..Default::default()
-    }));
+    items.extend(candidates.into_iter().map(node_completion_item));
     Ok(Some(CompletionResponse::Array(items)))
+  }
+}
+
+/// Completion item for an indexed node. `detail` is the declaration signature, so the
+/// list says what the thing is and what it takes rather than which file it came from.
+fn node_completion_item(n: &NodeInfo) -> CompletionItem {
+  CompletionItem {
+    label: n.short_name.clone(),
+    kind: Some(match n.kind {
+      NodeKind::Struct | NodeKind::Interface => CompletionItemKind::STRUCT,
+      NodeKind::Enum => CompletionItemKind::ENUM,
+      NodeKind::Annotation => CompletionItemKind::INTERFACE,
+      NodeKind::Const => CompletionItemKind::CONSTANT,
+      _ => CompletionItemKind::TEXT,
+    }),
+    detail: Some(n.signature()),
+    documentation: n.doc_comment.as_ref().map(|d| {
+      Documentation::MarkupContent(MarkupContent {
+        kind:  MarkupKind::Markdown,
+        value: d.clone(),
+      })
+    }),
+    ..Default::default()
+  }
+}
+
+/// Completion item for a declaration we only know from a surface-text scan — the
+/// signature is whatever the declaration line says, since there are no compiled types.
+fn decl_completion_item(d: aliases::TopLevelDecl) -> CompletionItem {
+  CompletionItem {
+    label: d.name,
+    kind: Some(match d.kind {
+      aliases::DeclKind::Struct | aliases::DeclKind::Interface => {
+        CompletionItemKind::STRUCT
+      }
+      aliases::DeclKind::Enum => CompletionItemKind::ENUM,
+      aliases::DeclKind::Annotation => CompletionItemKind::INTERFACE,
+      aliases::DeclKind::Const => CompletionItemKind::CONSTANT,
+      aliases::DeclKind::Using => CompletionItemKind::TYPE_PARAMETER,
+    }),
+    detail: Some(d.signature),
+    documentation: d.doc_comment.map(|doc| {
+      Documentation::MarkupContent(MarkupContent {
+        kind:  MarkupKind::Markdown,
+        value: doc,
+      })
+    }),
+    ..Default::default()
   }
 }
 
@@ -829,6 +863,46 @@ fn locate_decl_name(
 /// normalizes absolute paths by stripping the leading `/`, so a reported "Users/foo/bar.capnp"
 /// is really "/Users/foo/bar.capnp". Imported standard files like "capnp/compat/json.capnp"
 /// live under the install's include dir, which `roots` covers.
+/// Resolve every `import "…"` in `text` to a schema on disk, paired with the import root
+/// it was found under.
+///
+/// These get compiled alongside the buffer. capnp emits an imported file's nodes only
+/// where the importer actually references them, so a freshly-typed `$Json.` sees an index
+/// holding whichever handful of json.capnp nodes the file happened to use already —
+/// which is why completion could list an annotation that signature help then knew
+/// nothing about. Naming the import as a requested file makes capnp emit all of it.
+fn imported_files(
+  text: &str,
+  requesting: &Path,
+  config: &Config,
+) -> Vec<compiler::ExtraFile> {
+  let mut out: Vec<compiler::ExtraFile> = Vec::new();
+  for import in aliases::imported_paths(text) {
+    let reported = PathBuf::from(import.trim_start_matches('/'));
+    let resolved =
+      resolve_target_file(&reported, requesting, &config.resolution_roots);
+    // `resolve_target_file` hands back its input when nothing matched on disk.
+    if !resolved.is_file() || resolved == requesting {
+      continue;
+    }
+    if out.iter().any(|e| e.path == resolved) {
+      continue;
+    }
+    // The root is whatever `resolved` has left once the import name is stripped off
+    // its tail — that is the directory capnp resolved the import against.
+    let src_prefix = resolved
+      .to_string_lossy()
+      .strip_suffix(&*reported.to_string_lossy())
+      .map(|root| PathBuf::from(root.trim_end_matches('/')))
+      .filter(|root| !root.as_os_str().is_empty());
+    out.push(compiler::ExtraFile {
+      src_prefix,
+      path: resolved,
+    });
+  }
+  out
+}
+
 fn resolve_target_file(
   reported: &Path,
   requesting: &Path,
@@ -862,6 +936,10 @@ fn resolve_target_file(
 struct EnclosingCall {
   callee:           String,
   active_parameter: u32,
+  /// The `name` in `name = value` for the argument the cursor sits in, when the user has
+  /// already typed the `=`. Cap'n Proto's struct-valued annotations take named arguments
+  /// in any order, so the comma index alone would highlight the wrong field.
+  arg_name:         Option<String>,
 }
 
 fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
@@ -872,6 +950,8 @@ fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
   // Walk back tracking paren depth; stop at the unmatched `(` that contains us.
   let mut depth: i32 = 0;
   let mut commas: u32 = 0;
+  // Byte just past the top-level `,` (or `(`) that opens the argument the cursor is in.
+  let mut segment_start = cursor;
   let mut i = cursor;
   while i > 0 {
     i -= 1;
@@ -897,20 +977,45 @@ fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
             return None;
           }
           let callee = std::str::from_utf8(&bytes[k..j]).ok()?.to_string();
+          if commas == 0 {
+            segment_start = i + 1;
+          }
           return Some(EnclosingCall {
             callee,
             active_parameter: commas,
+            arg_name: named_argument(text, segment_start, cursor),
           });
         }
         if depth < 0 {
           return None; // unmatched `[` or `{` — not an annotation/call
         }
       }
-      b',' if depth == 0 => commas += 1,
+      b',' if depth == 0 => {
+        if commas == 0 {
+          segment_start = i + 1;
+        }
+        commas += 1;
+      }
       _ => {}
     }
   }
   None
+}
+
+/// For the argument text `text[start..cursor]`, return the `name` of a `name = value`
+/// binding the user has already committed to (the `=` must be typed). Returns None while
+/// the name itself is still being typed, or for a positional value.
+fn named_argument(text: &str, start: usize, cursor: usize) -> Option<String> {
+  let seg = text.get(start..cursor)?;
+  let (name, _) = seg.split_once('=')?;
+  let name = name.trim();
+  if name.is_empty()
+    || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    || name.starts_with(|c: char| c.is_ascii_digit())
+  {
+    return None;
+  }
+  Some(name.to_string())
 }
 
 fn build_field_signature(
@@ -926,8 +1031,12 @@ fn build_field_signature(
     }
     let start = label.len() as u32;
     label.push_str(&f.name);
-    label.push_str(" = ");
-    label.push_str(&f.type_str);
+    // `type_str` already carries its leading `:`, so this renders the argument the way
+    // the field is declared: `name :Text`.
+    if !f.type_str.is_empty() {
+      label.push(' ');
+      label.push_str(&f.type_str);
+    }
     let end = label.len() as u32;
     params.push(ParameterInformation {
       label:         ParameterLabel::LabelOffsets([start, end]),
@@ -939,6 +1048,29 @@ fn build_field_signature(
     label,
     documentation: None,
     parameters: Some(params),
+    active_parameter: None,
+  }
+}
+
+/// Signature for an annotation whose value type isn't a struct — it takes a single
+/// positional value, so the one parameter is the type itself (`$flatten(:Void)`).
+fn build_value_signature(
+  label_prefix: &str,
+  type_str: &str,
+) -> SignatureInformation {
+  let mut label = String::from(label_prefix);
+  label.push_str("(:");
+  let start = label.len() as u32 - 1;
+  label.push_str(type_str);
+  let end = label.len() as u32;
+  label.push(')');
+  SignatureInformation {
+    label,
+    documentation: None,
+    parameters: Some(vec![ParameterInformation {
+      label:         ParameterLabel::LabelOffsets([start, end]),
+      documentation: None,
+    }]),
     active_parameter: None,
   }
 }
@@ -1314,4 +1446,80 @@ fn byte_to_position(rope: &Rope, byte: usize) -> Position {
   let line = rope.char_to_line(char_idx);
   let line_start = rope.line_to_char(line);
   Position::new(line as u32, (char_idx - line_start) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn call_at(text: &str, needle: &str) -> Option<EnclosingCall> {
+    let cursor = text.find(needle).expect("needle") + needle.len();
+    enclosing_call(text, cursor)
+  }
+
+  #[test]
+  fn enclosing_call_finds_dotted_annotation_callee() {
+    let src = "struct Foo $Json.discriminator() {}";
+    let call = call_at(src, "discriminator(").expect("call");
+    assert_eq!(call.callee, "Json.discriminator");
+    assert_eq!(call.active_parameter, 0);
+    assert_eq!(call.arg_name, None);
+  }
+
+  #[test]
+  fn enclosing_call_counts_commas_for_positional_arguments() {
+    let src = "struct Foo $ann(1, 2, 3) {}";
+    assert_eq!(call_at(src, "$ann(1, ").unwrap().active_parameter, 1);
+    assert_eq!(call_at(src, "$ann(1, 2, ").unwrap().active_parameter, 2);
+  }
+
+  #[test]
+  fn enclosing_call_ignores_nested_parens_and_brackets() {
+    let src = "struct Foo $ann(a = (x = 1), b = [2, 3], c = 4) {}";
+    let call = call_at(src, "b = [2, 3], ").expect("call");
+    assert_eq!(call.callee, "ann");
+    // Two top-level commas: the nested `(x = 1)` and `[2, 3]` contribute none.
+    assert_eq!(call.active_parameter, 2);
+  }
+
+  #[test]
+  fn enclosing_call_reports_the_named_argument_under_the_cursor() {
+    // Named arguments may appear in any order, so the name — not the comma index —
+    // decides which field signature help should highlight.
+    let src = "struct Foo $ann(count = 1, name = \"x\") {}";
+    assert_eq!(
+      call_at(src, "$ann(count = ").unwrap().arg_name.as_deref(),
+      Some("count")
+    );
+    assert_eq!(
+      call_at(src, "1, name = ").unwrap().arg_name.as_deref(),
+      Some("name")
+    );
+  }
+
+  #[test]
+  fn enclosing_call_has_no_argument_name_until_the_equals_is_typed() {
+    let src = "struct Foo $ann(count) {}";
+    assert_eq!(call_at(src, "$ann(cou").unwrap().arg_name, None);
+  }
+
+  #[test]
+  fn enclosing_call_reads_the_name_past_a_completed_nested_value() {
+    let src = "struct Foo $ann(opts = (x = 1)) {}";
+    assert_eq!(
+      call_at(src, "opts = (x = 1)").unwrap().arg_name.as_deref(),
+      Some("opts")
+    );
+  }
+
+  #[test]
+  fn enclosing_call_has_no_argument_name_for_a_positional_value() {
+    let src = "struct Foo $ann(\"hello\") {}";
+    assert_eq!(call_at(src, "$ann(\"hello\"").unwrap().arg_name, None);
+  }
+
+  #[test]
+  fn enclosing_call_returns_none_outside_parens() {
+    assert!(enclosing_call("struct Foo {}", 12).is_none());
+  }
 }

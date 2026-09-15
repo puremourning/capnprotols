@@ -788,6 +788,38 @@ mod tests {
     );
   }
 
+  // Regression: a const reference prefixed with `.` (absolute scoping — resolve the
+  // name from the file's top-level scope rather than the enclosing one) was only
+  // accepted inside a struct-shorthand value, so `foo @0 :UInt64 = .someConst;` — which
+  // `capnp compile` accepts happily — tripped a parse error and the formatter bailed.
+  // The leading dot now belongs to the const identifier itself, so it works in every
+  // const-value position.
+  #[test]
+  fn absolute_scoped_const_reference_formats() {
+    let src = concat!(
+      "@0x8418f7d75d78e978;\n",
+      "const testConst :UInt64 = 1000;\n",
+      "annotation ann(struct) :UInt64;\n",
+      "struct Foo $ann(.testConst) {\n",
+      "  foo @0 :UInt64 = .testConst;\n",
+      "  bar @1 :List(UInt64) = [.testConst, 2];\n",
+      "  baz @2 :Foo = (foo = .testConst);\n",
+      "  qux @3 :UInt64 = .Outer.Inner.someConst;\n",
+      "}\n",
+    );
+    let out =
+      fmt(src).expect("absolute-scoped const refs should format, not bail");
+    for expected in [
+      "$ann(.testConst)",
+      "foo @0 :UInt64 = .testConst;",
+      "bar @1 :List(UInt64) = [.testConst, 2];",
+      "baz @2 :Foo = (foo=.testConst);",
+      "qux @3 :UInt64 = .Outer.Inner.someConst;",
+    ] {
+      assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
+    }
+  }
+
   #[test]
   fn final_newline_added() {
     let src = "@0xeaf06436acd04fce;\nstruct A {\n  foo @0 :Text;\n}";
@@ -851,7 +883,10 @@ mod tests {
       out.contains("m @0 (a :Int32) -> (b :Int32);"),
       "method spacing wrong:\n{out}"
     );
-    assert!(out.contains("n @1! () -> ();"), "method spacing wrong:\n{out}");
+    assert!(
+      out.contains("n @1! () -> ();"),
+      "method spacing wrong:\n{out}"
+    );
   }
 
   #[test]

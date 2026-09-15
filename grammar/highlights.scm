@@ -77,7 +77,6 @@
 
 [
   (const_identifier)
-  (local_const)
   (enum_member)
 ] @constant
 

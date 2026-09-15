@@ -481,6 +481,229 @@ fn signature_help_for_annotation() {
   c.shutdown();
 }
 
+/// A file that imports json.capnp without referencing anything from it yet.
+const IMPORTS_JSON: &str = concat!(
+  "@0xec894daea719934c;\n",
+  "using Json = import \"/capnp/compat/json.capnp\";\n",
+  "struct Foo {\n",
+  "  test @0 :Text;\n",
+  "}\n",
+);
+
+/// Regression: capnp emits an imported file's nodes only where the importer references
+/// them, so the very first `$Json.flatten(` — the buffer that introduces the reference,
+/// and which doesn't compile while it's half-typed — used to find nothing in the index
+/// and return no signature at all. It only started working after the annotation was
+/// completed and the file saved. The imports are now compiled as requested files in
+/// their own right, so their whole node set is there from the start.
+#[test]
+fn signature_help_for_an_import_not_yet_referenced() {
+  let proj = TempProject::with_fixtures(&[]);
+  let path = proj.path("imports-json.capnp");
+  std::fs::write(&path, IMPORTS_JSON).unwrap();
+  let uri = format!("file://{}", path.display());
+  let mut c = LspClient::start();
+  let diags = c.open(&uri, IMPORTS_JSON);
+  assert!(
+    diags.is_empty(),
+    "fixture should compile cleanly: {diags:?}"
+  );
+
+  // Type `$Json.flatten(`, which leaves the buffer uncompilable mid-annotation.
+  let typing =
+    IMPORTS_JSON.replace("test @0 :Text;", "test @0 :Text $Json.flatten(");
+  c.change(&uri, 2, &typing);
+  let r = c.request(
+    "textDocument/signatureHelp",
+    json!({
+        "textDocument": { "uri": uri },
+        "position": after(&typing, "$Json.flatten("),
+    }),
+  );
+  let label = r["result"]["signatures"][0]["label"]
+    .as_str()
+    .unwrap_or_else(|| panic!("no signature: {}", r["result"]));
+  assert!(
+    label.starts_with("$Json.flatten(") && label.contains("prefix"),
+    "unexpected signature: {label}"
+  );
+  c.shutdown();
+}
+
+/// Regression: once the file referenced a single json.capnp annotation, the index held
+/// exactly that one node — and completion preferred the index over the surface scan, so
+/// `$Json.` collapsed from the whole file's declarations down to the one already in use.
+#[test]
+fn member_completion_stays_complete_after_referencing_one_import() {
+  let proj = TempProject::with_fixtures(&[]);
+  let path = proj.path("one-ref.capnp");
+  let referenced =
+    IMPORTS_JSON.replace("test @0 :Text;", "test @0 :Text $Json.flatten();");
+  std::fs::write(&path, &referenced).unwrap();
+  let uri = format!("file://{}", path.display());
+  let mut c = LspClient::start();
+  let diags = c.open(&uri, &referenced);
+  assert!(
+    diags.is_empty(),
+    "fixture should compile cleanly: {diags:?}"
+  );
+
+  let typing = referenced.replace("$Json.flatten();", "$Json.flatten() $Json.");
+  c.change(&uri, 2, &typing);
+  let r = c.request(
+    "textDocument/completion",
+    json!({
+        "textDocument": { "uri": uri },
+        "position": after(&typing, "$Json.flatten() $Json."),
+    }),
+  );
+  let items = r["result"].as_array().expect("completion items");
+  let labels: Vec<&str> =
+    items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+  for want in ["flatten", "discriminator", "name", "base64", "Value"] {
+    assert!(labels.contains(&want), "want {want}, got {labels:?}");
+  }
+  c.shutdown();
+}
+
+/// A schema exercising every annotation shape signature help has to cover: a
+/// struct-valued annotation (named arguments), a Text-valued one (a single positional
+/// value), and a Void-valued one.
+const ANNOTATED: &str = concat!(
+  "@0xeaf06436acd04fc8;\n",
+  "struct Opts {\n",
+  "  name @0 :Text;\n",
+  "  count @1 :UInt32;\n",
+  "}\n",
+  "annotation structAnn(struct, field) :Opts;\n",
+  "annotation textAnn(struct) :Text;\n",
+  "struct Foo $structAnn(count = 1, name = \"x\") $textAnn(\"hi\") {\n",
+  "  bar @0 :Text;\n",
+  "}\n",
+);
+
+/// Position just past `needle`, which must be unique enough to land on the right line.
+fn after(text: &str, needle: &str) -> Value {
+  for (i, line) in text.lines().enumerate() {
+    if let Some(c) = line.find(needle) {
+      return pos(i as u32, (c + needle.len()) as u32);
+    }
+  }
+  panic!("after: {needle:?} not found");
+}
+
+fn open_annotated(c: &mut LspClient, proj: &TempProject) -> String {
+  let path = proj.path("annotated.capnp");
+  std::fs::write(&path, ANNOTATED).unwrap();
+  let uri = format!("file://{}", path.display());
+  let diags = c.open(&uri, ANNOTATED);
+  assert!(
+    diags.is_empty(),
+    "fixture should compile cleanly: {diags:?}"
+  );
+  uri
+}
+
+/// An annotation whose value type isn't a struct takes a single positional value, so
+/// signature help has to describe that value's type rather than bailing out — which is
+/// what it used to do for everything except struct-valued annotations.
+#[test]
+fn signature_help_for_non_struct_annotation() {
+  let proj = TempProject::with_fixtures(&[]);
+  let mut c = LspClient::start();
+  let uri = open_annotated(&mut c, &proj);
+
+  let r = c.request(
+    "textDocument/signatureHelp",
+    json!({
+        "textDocument": { "uri": uri },
+        "position": after(ANNOTATED, "$textAnn("),
+    }),
+  );
+  assert_eq!(r["result"]["signatures"][0]["label"], "$textAnn(:Text)");
+  assert_eq!(r["result"]["activeParameter"], 0);
+  c.shutdown();
+}
+
+/// Cap'n Proto's struct-valued annotations take named arguments in any order, so the
+/// highlighted parameter follows the name the cursor is inside, not the comma index.
+#[test]
+fn signature_help_highlights_the_named_argument_not_the_comma_index() {
+  let proj = TempProject::with_fixtures(&[]);
+  let mut c = LspClient::start();
+  let uri = open_annotated(&mut c, &proj);
+
+  let sig_help = |c: &mut LspClient, at: Value| {
+    c.request(
+      "textDocument/signatureHelp",
+      json!({ "textDocument": { "uri": uri }, "position": at }),
+    )
+  };
+
+  // `count` is declared second but written first: highlight parameter 1.
+  let r = sig_help(&mut c, after(ANNOTATED, "$structAnn(count = "));
+  assert_eq!(
+    r["result"]["signatures"][0]["label"],
+    "$structAnn(name :Text, count :UInt32)"
+  );
+  assert_eq!(r["result"]["activeParameter"], 1);
+
+  // `name` is declared first but written second: highlight parameter 0.
+  let r = sig_help(&mut c, after(ANNOTATED, "1, name = "));
+  assert_eq!(r["result"]["activeParameter"], 0);
+
+  // With no name typed yet we fall back to the comma index.
+  let r = sig_help(&mut c, after(ANNOTATED, "$structAnn(count = 1, "));
+  assert_eq!(r["result"]["activeParameter"], 1);
+  c.shutdown();
+}
+
+/// Completion `detail` is the declaration signature — what the thing is and what it
+/// takes. It used to be the node's capnp displayName, which is the containing file's
+/// path with the name glued on, and told the user nothing useful.
+#[test]
+fn completion_detail_is_the_signature_not_the_file_path() {
+  let proj = TempProject::with_fixtures(&[]);
+  let mut c = LspClient::start();
+  let uri = open_annotated(&mut c, &proj);
+
+  // Replace the `$textAnn("hi")` application with a bare `$` to complete at.
+  let typing = ANNOTATED.replace("$textAnn(\"hi\")", "$");
+  c.change(&uri, 2, &typing);
+  let r = c.request(
+    "textDocument/completion",
+    json!({
+        "textDocument": { "uri": uri },
+        "position": after(&typing, "$structAnn(count = 1, name = \"x\") $"),
+    }),
+  );
+
+  let items = r["result"].as_array().expect("completion items");
+  let detail = |label: &str| -> String {
+    items
+      .iter()
+      .find(|i| i["label"] == label)
+      .unwrap_or_else(|| panic!("no completion item {label:?} in {items:#?}"))
+      ["detail"]
+      .as_str()
+      .unwrap_or_default()
+      .to_string()
+  };
+  assert_eq!(
+    detail("structAnn"),
+    "annotation structAnn(struct, field) :Opts"
+  );
+  assert_eq!(detail("textAnn"), "annotation textAnn(struct) :Text");
+  for item in items {
+    let d = item["detail"].as_str().unwrap_or_default();
+    assert!(
+      !d.contains(".capnp"),
+      "completion detail still leaks a file path: {d}"
+    );
+  }
+  c.shutdown();
+}
+
 #[test]
 fn signature_help_for_list() {
   let mut c = LspClient::start();
