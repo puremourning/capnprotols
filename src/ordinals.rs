@@ -16,6 +16,9 @@ use crate::aliases::strip_comments;
 enum BlockKind {
   Struct,
   Enum,
+  /// `type Name = group { ... }` / `type Name = union { ... }`: the body opens its own
+  /// ordinal space, just like a struct.
+  Newtype,
   Group,
   Union,
   Other,
@@ -99,10 +102,12 @@ fn enclosing_struct_or_enum(text: &str, cursor: usize) -> Option<OpenBrace> {
     }
     i += 1;
   }
-  stack
-    .into_iter()
-    .rev()
-    .find(|f| matches!(f.kind, BlockKind::Struct | BlockKind::Enum))
+  stack.into_iter().rev().find(|f| {
+    matches!(
+      f.kind,
+      BlockKind::Struct | BlockKind::Newtype | BlockKind::Enum
+    )
+  })
 }
 
 /// Classify what kind of block an opening `{` belongs to by scanning the tokens that
@@ -131,7 +136,9 @@ fn classify_block(text: &str, brace_byte: usize) -> BlockKind {
     .collect();
   // Anonymous union has just `union` on its own; named union doesn't exist. `:group` is
   // a field type whose body is a brace-delimited declaration.
-  if words.contains(&"struct") {
+  if words.first() == Some(&"type") {
+    BlockKind::Newtype
+  } else if words.contains(&"struct") {
     BlockKind::Struct
   } else if words.contains(&"enum") {
     BlockKind::Enum
@@ -180,8 +187,11 @@ fn collect_ordinals(body: &str, outer: BlockKind) -> Vec<u32> {
     if bytes[i] == b'{' {
       let kind = classify_block(body, i);
       let crosses_scope = match outer {
-        BlockKind::Struct => {
-          matches!(kind, BlockKind::Struct | BlockKind::Enum)
+        BlockKind::Struct | BlockKind::Newtype => {
+          matches!(
+            kind,
+            BlockKind::Struct | BlockKind::Newtype | BlockKind::Enum
+          )
         }
         BlockKind::Enum => true,
         _ => false,
@@ -372,6 +382,24 @@ mod tests {
     // @[0,2] and @3 -> used {0,2,3}; gap 1 is offered before next 4.
     let src = "struct S {\n  a @[0,2] :T;\n  b @3 :Text;\n  c @|";
     assert_eq!(ords_at(src), vec![1, 4]);
+  }
+
+  #[test]
+  fn newtype_union_has_own_id_space() {
+    let src = "type P = union {\n  a @[0-1] :X;\n  b @[2-3] :X;\n  c @|";
+    assert_eq!(ords_at(src), vec![4]);
+  }
+
+  #[test]
+  fn newtype_group_has_own_id_space() {
+    let src = "type P = group $Foo.bar {\n  a @0 :Int64;\n  b @|";
+    assert_eq!(ords_at(src), vec![1]);
+  }
+
+  #[test]
+  fn struct_ignores_nested_newtype_ordinals() {
+    let src = "struct S {\n  a @0 :X;\n  type P = union {\n    b @0 :X;\n    c @1 :X;\n  }\n  d @|";
+    assert_eq!(ords_at(src), vec![1]);
   }
 
   #[test]
