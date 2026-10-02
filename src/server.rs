@@ -16,11 +16,11 @@ use crate::index::{Index, NodeInfo, NodeKind};
 use crate::{aliases, compiler, diagnostics, ordinals, semantic_tokens};
 
 pub struct Backend {
-  client: Client,
-  docs: DocumentStore,
-  config: Arc<RwLock<Config>>,
+  client:       Client,
+  docs:         DocumentStore,
+  config:       Arc<RwLock<Config>>,
   /// Per-file symbol index, keyed by the file's URI.
-  indices: Arc<DashMap<Url, Arc<Index>>>,
+  indices:      Arc<DashMap<Url, Arc<Index>>>,
   /// Memoizes `.capnpfmtignore` lookups by parent directory across the
   /// server's lifetime. Consulted once per `did_open`; the resulting bool
   /// is then stashed on the `Document` so format requests are just a bool
@@ -93,7 +93,7 @@ impl Backend {
     let start = byte_to_position(&target_rope, alias.name_start_byte);
     let end = byte_to_position(&target_rope, alias.name_end_byte);
     Some(Location {
-      uri: target_uri,
+      uri:   target_uri,
       range: Range { start, end },
     })
   }
@@ -203,8 +203,8 @@ impl LanguageServer for Backend {
             cfg.resolution_roots,
         );
     Ok(InitializeResult {
-      server_info: Some(ServerInfo {
-        name: "capnprotols".to_string(),
+      server_info:  Some(ServerInfo {
+        name:    "capnprotols".to_string(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
       }),
       capabilities: ServerCapabilities {
@@ -215,15 +215,18 @@ impl LanguageServer for Backend {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
-          trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
-          retrigger_characters: Some(vec![",".to_string()]),
+          trigger_characters:         Some(vec![
+            "(".to_string(),
+            ",".to_string(),
+          ]),
+          retrigger_characters:       Some(vec![",".to_string()]),
           work_done_progress_options: Default::default(),
         }),
         semantic_tokens_provider: Some(
           SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
               legend: SemanticTokensLegend {
-                token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
+                token_types:     semantic_tokens::TOKEN_TYPES.to_vec(),
                 token_modifiers: semantic_tokens::TOKEN_MODIFIERS.to_vec(),
               },
               full: Some(SemanticTokensFullOptions::Bool(true)),
@@ -333,7 +336,7 @@ impl LanguageServer for Backend {
       if target_path.exists() {
         if let Ok(target_uri) = Url::from_file_path(&target_path) {
           return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
+            uri:   target_uri,
             range: Range::default(),
           })));
         }
@@ -427,7 +430,7 @@ impl LanguageServer for Backend {
       )
     });
     Ok(Some(GotoDefinitionResponse::Scalar(Location {
-      uri: target_uri,
+      uri:   target_uri,
       range: Range { start, end },
     })))
   }
@@ -494,12 +497,12 @@ impl LanguageServer for Backend {
     let mut param_names: Vec<String> = Vec::new();
     let signature = if call.callee == "List" {
       Some(SignatureInformation {
-        label: "List(T)".into(),
-        documentation: Some(Documentation::String(
+        label:            "List(T)".into(),
+        documentation:    Some(Documentation::String(
           "List of T. Element type follows.".into(),
         )),
-        parameters: Some(vec![ParameterInformation {
-          label: ParameterLabel::Simple("T".into()),
+        parameters:       Some(vec![ParameterInformation {
+          label:         ParameterLabel::Simple("T".into()),
           documentation: None,
         }]),
         active_parameter: Some(0),
@@ -565,7 +568,7 @@ impl LanguageServer for Backend {
     };
     signature.active_parameter = Some(active);
     Ok(Some(SignatureHelp {
-      signatures: vec![signature],
+      signatures:       vec![signature],
       active_signature: Some(0),
       active_parameter: Some(active),
     }))
@@ -647,10 +650,10 @@ impl LanguageServer for Backend {
     }
     Ok(Some(Hover {
       contents: HoverContents::Markup(MarkupContent {
-        kind: MarkupKind::Markdown,
+        kind:  MarkupKind::Markdown,
         value: md,
       }),
-      range: None,
+      range:    None,
     }))
   }
 
@@ -816,7 +819,7 @@ fn node_completion_item(
           format!("{}-{}", start, start + count - 1)
         };
         Some(vec![TextEdit {
-          range: *range,
+          range:    *range,
           new_text: fill,
         }])
       }
@@ -836,7 +839,7 @@ fn node_completion_item(
     detail: Some(n.signature()),
     documentation: n.doc_comment.as_ref().map(|d| {
       Documentation::MarkupContent(MarkupContent {
-        kind: MarkupKind::Markdown,
+        kind:  MarkupKind::Markdown,
         value: d.clone(),
       })
     }),
@@ -862,7 +865,7 @@ fn decl_completion_item(d: aliases::TopLevelDecl) -> CompletionItem {
     detail: Some(d.signature),
     documentation: d.doc_comment.map(|doc| {
       Documentation::MarkupContent(MarkupContent {
-        kind: MarkupKind::Markdown,
+        kind:  MarkupKind::Markdown,
         value: doc,
       })
     }),
@@ -977,12 +980,12 @@ fn resolve_target_file(
 /// the cursor. `callee` is the dotted name (e.g. `Json.discriminator`, `List`, or `Map`),
 /// `active_parameter` is the comma index of the cursor inside the parens.
 struct EnclosingCall {
-  callee: String,
+  callee:           String,
   active_parameter: u32,
   /// The `name` in `name = value` for the argument the cursor sits in, when the user has
   /// already typed the `=`. Cap'n Proto's struct-valued annotations take named arguments
   /// in any order, so the comma index alone would highlight the wrong field.
-  arg_name: Option<String>,
+  arg_name:         Option<String>,
 }
 
 fn enclosing_call(text: &str, cursor: usize) -> Option<EnclosingCall> {
@@ -1082,7 +1085,7 @@ fn build_field_signature(
     }
     let end = label.len() as u32;
     params.push(ParameterInformation {
-      label: ParameterLabel::LabelOffsets([start, end]),
+      label:         ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -1111,7 +1114,7 @@ fn build_value_signature(
     label,
     documentation: None,
     parameters: Some(vec![ParameterInformation {
-      label: ParameterLabel::LabelOffsets([start, end]),
+      label:         ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     }]),
     active_parameter: None,
@@ -1133,7 +1136,7 @@ fn build_generic_signature(
     label.push_str(p);
     let end = label.len() as u32;
     out.push(ParameterInformation {
-      label: ParameterLabel::LabelOffsets([start, end]),
+      label:         ParameterLabel::LabelOffsets([start, end]),
       documentation: None,
     });
   }
@@ -1192,7 +1195,7 @@ fn line_diff_edits(old: &str, new: &str) -> Vec<TextEdit> {
     edits.push(TextEdit {
       range: Range {
         start: Position::new(s, 0),
-        end: Position::new(end, 0),
+        end:   Position::new(end, 0),
       },
       new_text,
     });
