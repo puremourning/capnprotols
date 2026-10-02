@@ -735,7 +735,7 @@ impl LanguageServer for Backend {
         // the next-after-max. Outside any struct/enum: generate a fresh capnp ID.
         let candidates = ordinals::suggest_ordinals_at(&text, byte);
         if !candidates.is_empty() {
-          let items: Vec<CompletionItem> = candidates
+          let mut items: Vec<CompletionItem> = candidates
             .iter()
             .enumerate()
             .map(|(rank, n)| CompletionItem {
@@ -754,6 +754,21 @@ impl LanguageServer for Backend {
               ..Default::default()
             })
             .collect();
+          // Fields typed as a group/union newtype take an `@[…]` ordinal range. Offer
+          // an empty `[]`; completing the type after `:` then fills it in with a
+          // correctly-sized range (see `empty_ordinal_range_slot`).
+          if ordinals::ordinal_range_allowed_at(&text, byte) {
+            items.push(CompletionItem {
+              label: "[]".to_string(),
+              kind: Some(CompletionItemKind::VALUE),
+              detail: Some(
+                "auto-assign ordinal range for a newtype group/union"
+                  .to_string(),
+              ),
+              sort_text: Some(format!("{:04}_[]", candidates.len())),
+              ..Default::default()
+            });
+          }
           return Ok(Some(CompletionResponse::Array(items)));
         }
         // Top-level / declaration site: generate a unique capnp ID.

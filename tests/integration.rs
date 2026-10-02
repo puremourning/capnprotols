@@ -407,10 +407,12 @@ fn completion_field_ordinal_sequence() {
     json!({ "textDocument": { "uri": uri }, "position": pos(4, 7) }),
   );
   let items = r["result"].as_array().expect("items");
-  // Dense sequence (0, 1) -> only one candidate: the next-after-max.
-  assert_eq!(items.len(), 1);
+  // Dense sequence (0, 1) -> one numeric candidate (the next-after-max), then the
+  // `[]` ordinal-range placeholder for newtype fields.
+  assert_eq!(items.len(), 2);
   assert_eq!(items[0]["label"], "2");
   assert_eq!(items[0]["detail"], "next field ordinal");
+  assert_eq!(items[1]["label"], "[]");
   c.shutdown();
 }
 
@@ -430,7 +432,7 @@ fn completion_field_ordinal_offers_gaps_first() {
   let items = r["result"].as_array().expect("items");
   let labels: Vec<&str> =
     items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-  assert_eq!(labels, vec!["1", "4", "6"], "got {labels:?}");
+  assert_eq!(labels, vec!["1", "4", "6", "[]"], "got {labels:?}");
   assert_eq!(items[0]["preselect"], true);
   c.shutdown();
 }
@@ -913,7 +915,7 @@ fn completion_field_ordinal_after_range() {
   let items = r["result"].as_array().expect("items");
   let labels: Vec<&str> =
     items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-  assert_eq!(labels, vec!["4"], "range ordinals mis-counted: {labels:?}");
+  assert_eq!(labels, vec!["4", "[]"], "range ordinals mis-counted: {labels:?}");
   c.shutdown();
 }
 

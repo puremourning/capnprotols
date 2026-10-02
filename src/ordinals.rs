@@ -59,6 +59,14 @@ pub fn suggest_ordinals_at(text: &str, cursor: usize) -> Vec<u32> {
   out
 }
 
+/// Whether a field at `cursor` may use the `@[…]` ordinal-range form, i.e. it sits in a
+/// struct or newtype body (directly or via a group/union) rather than an enum.
+pub fn ordinal_range_allowed_at(text: &str, cursor: usize) -> bool {
+  let cleaned = strip_for_scan(text);
+  enclosing_struct_or_enum(&cleaned, cursor)
+    .is_some_and(|b| matches!(b.kind, BlockKind::Struct | BlockKind::Newtype))
+}
+
 /// Strip both `# ...` line comments and `"..."` string literals — replacing their bytes
 /// with spaces so byte offsets are preserved.
 fn strip_for_scan(src: &str) -> String {
@@ -400,6 +408,20 @@ mod tests {
   fn struct_ignores_nested_newtype_ordinals() {
     let src = "struct S {\n  a @0 :X;\n  type P = union {\n    b @0 :X;\n    c @1 :X;\n  }\n  d @|";
     assert_eq!(ords_at(src), vec![1]);
+  }
+
+  fn range_allowed(src: &str) -> bool {
+    let cursor = src.find('|').expect("needs `|`");
+    ordinal_range_allowed_at(&src.replace('|', ""), cursor)
+  }
+
+  #[test]
+  fn ordinal_range_allowed_in_struct_and_newtype_only() {
+    assert!(range_allowed("struct S {\n  a @|"));
+    assert!(range_allowed("struct S {\n  u :union {\n    a @|"));
+    assert!(range_allowed("type P = group {\n  a @|"));
+    assert!(!range_allowed("enum E {\n  a @|"));
+    assert!(!range_allowed("using X = @|"));
   }
 
   #[test]
