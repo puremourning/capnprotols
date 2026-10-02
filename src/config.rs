@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
@@ -57,36 +58,47 @@ impl Config {
 
     // Resolution roots in priority order:
     //   1. user-supplied import paths (LSP initializationOptions.importPaths)
-    //   2. include dir derived from the resolved capnp binary's install prefix
-    //   3. capnp's two hardcoded standard paths (/usr/local/include, /usr/include)
-    //   4. common platform defaults probed for actual presence
-    // We then probe each candidate by checking whether `capnp/c++.capnp` exists under
-    // it — that's the canonical "is this a capnp include root" test, mirroring what
-    // capnp itself looks for. Only matching roots are kept (deduplicated).
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.extend(opts.import_paths.iter().cloned());
-    if let Some(inc) = derive_capnp_include(&compiler_path) {
-      candidates.push(inc);
+    //   2. the compiler's standard import paths, as reported by `capnp config
+    //      --import-paths`. These are exactly the directories capnp searches, in its own
+    //      order, so they're kept as-is.
+    //   3. if the compiler doesn't support `capnp config` (e.g. a stock release), a best
+    //      guess instead: the include dir derived from the resolved capnp binary's install
+    //      prefix, capnp's two hardcoded standard paths (/usr/local/include,
+    //      /usr/include), then common platform defaults. Each guess is kept only if
+    //      `capnp/c++.capnp` exists under it — the canonical "is this a capnp include
+    //      root" test, mirroring what capnp itself looks for.
+    // Candidates are deduplicated after canonicalization. `trusted` candidates are kept
+    // whether or not they contain the standard schema tree (user paths may host unrelated
+    // schemas; compiler-reported paths are searched by capnp regardless).
+    let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+    candidates.extend(opts.import_paths.iter().map(|p| (p.clone(), true)));
+    match query_standard_import_paths(&compiler_path) {
+      Some(paths) => {
+        candidates.extend(paths.into_iter().map(|p| (p, true)));
+      }
+      None => {
+        if let Some(inc) = derive_capnp_include(&compiler_path) {
+          candidates.push((inc, false));
+        }
+        for guess in [
+          "/usr/local/include",
+          "/usr/include",
+          "/opt/homebrew/include",
+          "/opt/local/include", // MacPorts
+        ] {
+          candidates.push((PathBuf::from(guess), false));
+        }
+      }
     }
-    candidates.push(PathBuf::from("/usr/local/include"));
-    candidates.push(PathBuf::from("/usr/include"));
-    candidates.push(PathBuf::from("/opt/homebrew/include"));
-    candidates.push(PathBuf::from("/opt/local/include")); // MacPorts
 
     let mut seen = std::collections::HashSet::new();
     let mut resolution_roots = Vec::new();
-    for c in candidates {
+    for (c, trusted) in candidates {
       let canon = std::fs::canonicalize(&c).unwrap_or_else(|_| c.clone());
       if !seen.insert(canon.clone()) {
         continue;
       }
-      // Always keep user-supplied import paths (they may host non-standard schemas
-      // unrelated to the bundled capnp/* tree). For all others, keep only roots that
-      // actually contain the standard schema tree.
-      let is_user = opts.import_paths.iter().any(|p| {
-        std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canon
-      });
-      if is_user || canon.join("capnp/c++.capnp").exists() {
+      if trusted || canon.join("capnp/c++.capnp").exists() {
         resolution_roots.push(canon);
       }
     }
@@ -100,10 +112,39 @@ impl Config {
   }
 }
 
+/// Asks the compiler for the directories it searches for non-relative imports, via
+/// `capnp config --import-paths` (one path per line, in search order). Returns `None` if
+/// the compiler can't be run or doesn't have the `config` subcommand: it was added
+/// alongside relocatable installs and isn't in stock capnp releases, which fail with
+/// "config: unknown command".
+fn query_standard_import_paths(compiler_path: &str) -> Option<Vec<PathBuf>> {
+  let output = Command::new(compiler_path)
+    .args(["config", "--import-paths"])
+    .stdin(Stdio::null())
+    .output()
+    .ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  Some(parse_import_paths(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_import_paths(stdout: &str) -> Vec<PathBuf> {
+  stdout
+    .lines()
+    .map(str::trim_end) // Windows line endings
+    .filter(|line| !line.is_empty())
+    .map(PathBuf::from)
+    .collect()
+}
+
 /// Given a capnp executable name or path, find the corresponding `include/` directory in
 /// the same install prefix (e.g. `/opt/homebrew/bin/capnp` -> `/opt/homebrew/include`).
+/// Symlinks are resolved first, so `/usr/local/bin/capnp -> /opt/capnp/bin/capnp` maps to
+/// `/opt/capnp/include`.
 fn derive_capnp_include(compiler_path: &str) -> Option<PathBuf> {
-  let resolved = which(compiler_path)?;
+  let found = which(compiler_path)?;
+  let resolved = std::fs::canonicalize(&found).unwrap_or(found);
   let bin_dir = resolved.parent()?;
   let prefix = bin_dir.parent()?;
   let inc = prefix.join("include");
@@ -128,6 +169,89 @@ fn which(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn parses_import_paths() {
+    assert_eq!(
+      parse_import_paths("/opt/capnp/include\r\n/usr/include\n\n"),
+      vec![
+        PathBuf::from("/opt/capnp/include"),
+        PathBuf::from("/usr/include")
+      ]
+    );
+    assert!(parse_import_paths("").is_empty());
+  }
+
+  /// Writes an executable shell script standing in for `capnp`.
+  #[cfg(unix)]
+  fn fake_compiler(dir: &Path, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("capnp");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    path.to_string_lossy().into_owned()
+  }
+
+  fn scratch_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+      "capnprotols-config-test-{}-{name}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(&dir).unwrap()
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn uses_compiler_reported_import_paths() {
+    let dir = scratch_dir("reported");
+    // Neither directory contains capnp/c++.capnp: compiler-reported paths are kept anyway.
+    let a = dir.join("a");
+    let b = dir.join("b");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let compiler = fake_compiler(
+      &dir,
+      &format!(
+        "[ \"$1 $2\" = \"config --import-paths\" ] || exit 1\necho {}\necho {}",
+        a.display(),
+        b.display()
+      ),
+    );
+
+    let cfg = Config::from_init(Some(InitOptions {
+      compiler_path: Some(compiler),
+      ..Default::default()
+    }));
+    assert_eq!(cfg.resolution_roots, vec![a, b]);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn falls_back_when_compiler_lacks_config() {
+    // Lay out an install prefix, reached through a symlink, without `capnp config`.
+    let dir = scratch_dir("fallback");
+    let prefix = dir.join("prefix");
+    std::fs::create_dir_all(prefix.join("bin")).unwrap();
+    std::fs::create_dir_all(prefix.join("include/capnp")).unwrap();
+    std::fs::write(prefix.join("include/capnp/c++.capnp"), "").unwrap();
+    let real = fake_compiler(
+      &prefix.join("bin"),
+      "echo \"capnp: config: unknown command\" >&2; exit 1",
+    );
+    let link = dir.join("capnp-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let cfg = Config::from_init(Some(InitOptions {
+      compiler_path: Some(link.to_string_lossy().into_owned()),
+      ..Default::default()
+    }));
+    assert_eq!(cfg.resolution_roots.first(), Some(&prefix.join("include")));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
   #[test]
   fn probe_finds_at_least_one_capnp_include() {
     let cfg = Config::from_init(None);
