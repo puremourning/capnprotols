@@ -68,9 +68,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "capnp"
-version = "0.27.0-alpha"
-source = "git+https://github.com/puremourning/capnproto-rust?branch=newtype#96df114d9e52b216e2f1ead5543136832078d5cd"
+name = "capnp-newtype"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5de838d91bef5e4c76a15987600f668229d806fdf7614de5eb105f3bd456a1c"
 dependencies = [
  "embedded-io",
 ]
@@ -80,7 +81,7 @@ name = "capnprotols"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp-newtype",
  "cc",
  "dashmap",
  "ignore",
