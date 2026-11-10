@@ -18,6 +18,12 @@ hackily and quickly to deliver value. It therefore should not be relied on.
   - the path string inside `import "..."`,
   - name-based fallback for cases the compiler doesn't track (e.g. type parameters
     inside `List(T)`).
+- **Find references** for structs, enums, interfaces and other named declarations, from
+  either a use site or the declaration. Covers open buffers (including unsaved
+  edits) and every `.capnp` file in the workspace (see `workspace` under
+  Configuration), which are compiled on demand and cached until they change. References are matched by node id, so
+  they work across imports. Uses of a `using` alias are reported as uses of the
+  type it names.
 - **Hover** — kind + name + the node's doc comment from `cgr.sourceInfo`.
 - **Semantic-token highlighting** via tree-sitter-capnp's bundled queries, mapped
   to standard LSP token types (built-ins get the `defaultLibrary` modifier).
@@ -157,9 +163,23 @@ JSON shape:
     "enabled":        true,           // master switch for textDocument/formatting
     "maxWidth":       100,            // hard column limit (KJ style guide default)
     "warnLongLines":  true            // diagnose lines we can't auto-wrap
+  },
+  "workspace": {                      // which schemas find-references searches
+    "include":      [],               // globs, e.g. ["foo/*/schema/**"]; default: everything
+    "exclude":      [],               // added to the defaults: **/node_modules, **/.*
+    "useGitIgnore": true,             // honour .gitignore / .ignore
+    "maxFiles":     5000              // stop scanning after this many schemas
   }
 }
 ```
+
+Cap'n Proto has no project file, so the workspace is every `.capnp` file under
+the editor's workspace folders (or, if the client sends none, the directories of
+the open files). On a large repository, point `workspace.include` at the schema
+directories: patterns are relative to each workspace folder unless absolute, a
+pattern that matches a directory includes everything under it, and directories
+that can't match are never walked. If the scan reaches `maxFiles` the server
+warns once and searches only the schemas found so far.
 
 Standard import roots are auto-discovered on startup. The server probes:
 

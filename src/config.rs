@@ -13,6 +13,38 @@ pub struct InitOptions {
 
   /// Formatter settings (textDocument/formatting).
   pub format: FormatOptions,
+
+  /// Which schemas make up the workspace (used by find-references).
+  pub workspace: WorkspaceOptions,
+}
+
+/// Controls the workspace scan. Cap'n Proto has no project file, so the workspace is
+/// every `.capnp` file under the workspace folders, narrowed by these patterns — on a
+/// large repo, point `include` at the schema directories so the scan stays cheap.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WorkspaceOptions {
+  /// Globs selecting schemas, relative to each workspace folder unless absolute
+  /// (`foo/*/schema/**`). A pattern matching a directory includes everything under it.
+  /// Empty means the whole workspace.
+  pub include:        Vec<String>,
+  /// Globs to skip, added to the defaults (`**/node_modules`, `**/.*`).
+  pub exclude:        Vec<String>,
+  /// Honour `.gitignore`, `.ignore` and git's global/info excludes.
+  pub use_git_ignore: bool,
+  /// Stop scanning after this many schemas.
+  pub max_files:      usize,
+}
+
+impl Default for WorkspaceOptions {
+  fn default() -> Self {
+    Self {
+      include:        Vec::new(),
+      exclude:        Vec::new(),
+      use_git_ignore: true,
+      max_files:      5000,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +79,7 @@ pub struct Config {
   /// include root derived from the compiler binary location.
   pub resolution_roots: Vec<PathBuf>,
   pub format:           FormatOptions,
+  pub workspace:        WorkspaceOptions,
 }
 
 impl Config {
@@ -96,6 +129,7 @@ impl Config {
       import_paths: opts.import_paths,
       resolution_roots,
       format: opts.format,
+      workspace: opts.workspace,
     }
   }
 }

@@ -13,21 +13,35 @@ use crate::config::{Config, InitOptions};
 use crate::document::DocumentStore;
 use crate::ignore_file::IgnoreCache;
 use crate::index::{Index, NodeInfo, NodeKind};
-use crate::{aliases, compiler, diagnostics, ordinals, semantic_tokens};
+use crate::references::{self, locate_decl_name, WorkspaceIndex};
+use crate::{
+  aliases,
+  compiler,
+  diagnostics,
+  ordinals,
+  semantic_tokens,
+  workspace,
+};
 
 pub struct Backend {
-  client:       Client,
-  docs:         DocumentStore,
-  config:       Arc<RwLock<Config>>,
+  client:           Client,
+  docs:             DocumentStore,
+  config:           Arc<RwLock<Config>>,
   /// Per-file symbol index, keyed by the file's URI.
-  indices:      Arc<DashMap<Url, Arc<Index>>>,
+  indices:          Arc<DashMap<Url, Arc<Index>>>,
   /// Memoizes `.capnpfmtignore` lookups by parent directory across the
   /// server's lifetime. Consulted once per `did_open`; the resulting bool
   /// is then stashed on the `Document` so format requests are just a bool
   /// check. Discovery is not refreshed for the lifetime of the server, so
   /// edits to `.capnpfmtignore` only take effect after a server restart
   /// (or close+reopen of files whose decision the user wants re-evaluated).
-  ignore_cache: Arc<Mutex<IgnoreCache>>,
+  ignore_cache:     Arc<Mutex<IgnoreCache>>,
+  /// Workspace folders from `initialize`, scanned for schemas by find-references.
+  workspace_roots:  Arc<RwLock<Vec<PathBuf>>>,
+  /// Identifier lists for workspace schemas that aren't open, for find-references.
+  workspace_index:  Arc<WorkspaceIndex>,
+  /// Set once we've told the user the workspace scan hit `maxFiles`.
+  warned_truncated: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Backend {
@@ -38,6 +52,9 @@ impl Backend {
       config: Arc::new(RwLock::new(Config::from_init(None))),
       indices: Arc::new(DashMap::new()),
       ignore_cache: Arc::new(Mutex::new(IgnoreCache::new())),
+      workspace_roots: Arc::new(RwLock::new(Vec::new())),
+      workspace_index: Arc::new(WorkspaceIndex::new()),
+      warned_truncated: Default::default(),
     }
   }
 
@@ -96,6 +113,21 @@ impl Backend {
       uri:   target_uri,
       range: Range { start, end },
     })
+  }
+
+  /// Tell the user (once per session) that the workspace scan stopped early, so results
+  /// may be incomplete and the patterns need narrowing.
+  async fn warn_scan_truncated(&self, max_files: usize) {
+    let msg = format!(
+      "capnprotols: the workspace has more than {max_files} schemas; only the first \
+       {max_files} are searched. Narrow `workspace.include` / `workspace.exclude` \
+       or raise `workspace.maxFiles`."
+    );
+    warn!("{msg}");
+    use std::sync::atomic::Ordering;
+    if !self.warned_truncated.swap(true, Ordering::Relaxed) {
+      self.client.show_message(MessageType::WARNING, msg).await;
+    }
   }
 
   async fn refresh(&self, uri: Url) {
@@ -194,6 +226,21 @@ impl LanguageServer for Backend {
         Err(e) => warn!("invalid initializationOptions: {e}"),
       }
     }
+    let mut roots: Vec<PathBuf> = params
+      .workspace_folders
+      .iter()
+      .flatten()
+      .filter_map(|f| f.uri.to_file_path().ok())
+      .collect();
+    #[allow(deprecated)] // root_uri is the fallback for clients without folders
+    if roots.is_empty() {
+      if let Some(p) =
+        params.root_uri.as_ref().and_then(|u| u.to_file_path().ok())
+      {
+        roots.push(p);
+      }
+    }
+    *self.workspace_roots.write().await = roots;
     let cfg = self.config.read().await;
     info!(
             "capnprotols {} initialized: compiler={}, import_paths={:?}, resolution_roots={:?}",
@@ -212,6 +259,7 @@ impl LanguageServer for Backend {
           TextDocumentSyncKind::INCREMENTAL,
         )),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
@@ -430,6 +478,168 @@ impl LanguageServer for Backend {
       uri:   target_uri,
       range: Range { start, end },
     })))
+  }
+
+  async fn references(
+    &self,
+    params: ReferenceParams,
+  ) -> RpcResult<Option<Vec<Location>>> {
+    let uri = params.text_document_position.text_document.uri.clone();
+    let pos = params.text_document_position.position;
+    let Some(text) = self.docs.get_text(&uri) else {
+      return Ok(None);
+    };
+    let Ok(path) = uri.to_file_path() else {
+      return Ok(None);
+    };
+    let Some(index) = self.indices.get(&uri).map(|e| e.clone()) else {
+      return Ok(None);
+    };
+    let rope = Rope::from_str(&text);
+    let byte = position_to_byte(&rope, pos);
+
+    // Target: a resolved identifier under the cursor, else the declaration whose name
+    // the cursor is on (declarations aren't FSI identifiers).
+    let target = index
+      .identifier_at(&path, byte)
+      .filter(|i| i.target_node_id != 0)
+      .and_then(|i| index.node(i.target_node_id))
+      .or_else(|| {
+        references::declaration_at(&index, &path, &text, byte as usize)
+      });
+    let Some(target) = target.cloned() else {
+      return Ok(None);
+    };
+    let leaf = references::leaf_name(&target).to_string();
+    let config = self.config.read().await.clone();
+
+    // Sources of identifiers, keyed by canonical on-disk path. Open buffers come first
+    // (their live index reflects unsaved edits); everything else is compiled from disk.
+    let mut sources: Vec<(PathBuf, Arc<Vec<crate::index::IdentRef>>)> =
+      Vec::new();
+    let mut open_texts: std::collections::HashMap<PathBuf, String> =
+      Default::default();
+    for entry in self.indices.iter() {
+      let Ok(p) = entry.key().to_file_path() else {
+        continue;
+      };
+      let Some(t) = self.docs.get_text(entry.key()) else {
+        continue;
+      };
+      let canon = references::canonical(&p);
+      sources.push((
+        canon.clone(),
+        Arc::new(entry.value().identifiers_in(&p).to_vec()),
+      ));
+      open_texts.insert(canon, t);
+    }
+    // Workspace roots, or — for clients that send none — the directories of the open
+    // buffers (not recursively), so a references request still sees sibling schemas.
+    let mut roots = self.workspace_roots.read().await.clone();
+    let mut max_depth = None;
+    if roots.is_empty() {
+      max_depth = Some(1);
+      for p in open_texts.keys() {
+        if let Some(parent) = p.parent() {
+          let parent = parent.to_path_buf();
+          if !roots.contains(&parent) {
+            roots.push(parent);
+          }
+        }
+      }
+    }
+    let skip: Vec<PathBuf> = open_texts.keys().cloned().collect();
+    let scan_config = config.workspace.clone();
+    let discovery = tokio::task::spawn_blocking(move || {
+      workspace::discover(&roots, &scan_config, max_depth)
+    })
+    .await
+    .unwrap_or_default();
+    if discovery.truncated {
+      self.warn_scan_truncated(config.workspace.max_files).await;
+    }
+    sources.extend(
+      self
+        .workspace_index
+        .identifiers(&config, &discovery.files, &skip)
+        .await,
+    );
+
+    let mut locations: Vec<Location> = Vec::new();
+    let mut seen: std::collections::HashSet<(PathBuf, usize, usize)> =
+      Default::default();
+    for (file, idents) in &sources {
+      let hits: Vec<&crate::index::IdentRef> = idents
+        .iter()
+        .filter(|i| i.target_node_id == target.id)
+        .collect();
+      if hits.is_empty() {
+        continue;
+      }
+      let file_text = match open_texts.get(file) {
+        Some(t) => t.clone(),
+        None => match std::fs::read_to_string(file) {
+          Ok(t) => t,
+          Err(_) => continue,
+        },
+      };
+      let Ok(file_uri) = Url::from_file_path(file) else {
+        continue;
+      };
+      let file_rope = Rope::from_str(&file_text);
+      for i in hits {
+        let (s, e) = references::narrow_to_leaf(
+          &file_text,
+          i.start_byte as usize,
+          i.end_byte as usize,
+          &leaf,
+        );
+        if !seen.insert((file.clone(), s, e)) {
+          continue;
+        }
+        locations.push(Location {
+          uri:   file_uri.clone(),
+          range: Range {
+            start: byte_to_position(&file_rope, s),
+            end:   byte_to_position(&file_rope, e),
+          },
+        });
+      }
+    }
+
+    if params.context.include_declaration
+      && !(target.start_byte == 0 && target.end_byte == 0)
+    {
+      let decl_path = references::canonical(&resolve_target_file(
+        &target.file,
+        &path,
+        &config.resolution_roots,
+      ));
+      let decl_text = open_texts
+        .get(&decl_path)
+        .cloned()
+        .or_else(|| std::fs::read_to_string(&decl_path).ok());
+      if let (Some(decl_text), Ok(decl_uri)) =
+        (decl_text, Url::from_file_path(&decl_path))
+      {
+        if let Some((s, e)) = references::decl_name_range(&target, &decl_text) {
+          if seen.insert((decl_path.clone(), s, e)) {
+            let r = Rope::from_str(&decl_text);
+            locations.insert(
+              0,
+              Location {
+                uri:   decl_uri,
+                range: Range {
+                  start: byte_to_position(&r, s),
+                  end:   byte_to_position(&r, e),
+                },
+              },
+            );
+          }
+        }
+      }
+    }
+    Ok(Some(locations))
   }
 
   async fn formatting(
@@ -825,38 +1035,6 @@ fn decl_completion_item(d: aliases::TopLevelDecl) -> CompletionItem {
     }),
     ..Default::default()
   }
-}
-
-/// Within `text[start..end]`, find the byte range of the first occurrence of `name` as a
-/// whole identifier token. Used to narrow a node's whole-declaration range down to just
-/// its name (so goto lands on `Foo` rather than the `struct` keyword).
-fn locate_decl_name(
-  text: &str,
-  start: usize,
-  end: usize,
-  name: &str,
-) -> Option<(usize, usize)> {
-  let bytes = text.as_bytes();
-  let end = end.min(bytes.len());
-  if start >= end || name.is_empty() {
-    return None;
-  }
-  let needle = name.as_bytes();
-  let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-  let mut i = start;
-  while i + needle.len() <= end {
-    if &bytes[i..i + needle.len()] == needle {
-      let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-      let after_idx = i + needle.len();
-      let after_ok =
-        after_idx >= bytes.len() || !is_ident_byte(bytes[after_idx]);
-      if before_ok && after_ok {
-        return Some((i, after_idx));
-      }
-    }
-    i += 1;
-  }
-  None
 }
 
 /// Map a compiler-reported file path back to a real on-disk path. The capnp compiler
