@@ -581,8 +581,8 @@ fn wrap_line_recursive(line: &str, max: usize) -> Vec<String> {
         w.iter().map(|l| l.chars().count()).max().unwrap_or(0) < original_max
       };
       let wrapped = wrap_annotation_chain(&code, max)
-        .filter(&improvement)
-        .or_else(|| wrap_generic_args(&code, max).filter(&improvement));
+        .filter(improvement)
+        .or_else(|| wrap_generic_args(&code, max).filter(improvement));
       if let Some(w) = wrapped {
         let tail: Vec<String> = chunks.split_off(1);
         // Recurse into each wrapped sub-line — covers nested
