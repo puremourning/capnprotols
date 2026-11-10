@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, newtype]
   pull_request:
-    branches: [main]
+    branches: [main, newtype]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,7 +20,12 @@ jobs:
         rust: [stable, beta, "1.81.0"]
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-capnproto
+      # This branch needs the newtype fork of capnp; stock releases can't parse
+      # `type X = …`, so the newtype tests would fail.
+      - uses: puremourning/rust-ci/setup-capnproto@v1
+        with:
+          repository: https://github.com/puremourning/capnproto
+          ref: newtype-v2
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -44,7 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-capnproto
+      # This branch needs the newtype fork of capnp; stock releases can't parse
+      # `type X = …`, so the newtype tests would fail.
+      - uses: puremourning/rust-ci/setup-capnproto@v1
+        with:
+          repository: https://github.com/puremourning/capnproto
+          ref: newtype-v2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -909,37 +909,8 @@ fn signature_help_for_list() {
   c.shutdown();
 }
 
-/// The `type X = …` newtype / `@[…]` ordinal-range syntax is only understood by a
-/// patched `capnp` (>= the type-alias feature branch). Tests that need the *compiler*
-/// (diagnostics, index-backed completion) probe for it and skip on a stock toolchain;
-/// the semantic-token and formatting tests are pure tree-sitter and always run. To run
-/// the gated tests, put the patched `capnp` first on `PATH`.
-fn capnp_supports_newtypes() -> bool {
-  let dir = std::env::temp_dir();
-  let probe = dir.join("__capnprotols_newtype_probe__.capnp");
-  let _ = std::fs::write(
-    &probe,
-    "@0xe227b60577350103;\ntype T = UInt32;\nstruct S { x @0 :T; }\n",
-  );
-  let ok = Command::new("capnp")
-    .arg("compile")
-    .arg("-o-")
-    .arg(&probe)
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false);
-  let _ = std::fs::remove_file(&probe);
-  ok
-}
-
 #[test]
 fn parses_newtype() {
-  if !capnp_supports_newtypes() {
-    eprintln!("skipping parses_newtype: `capnp` on PATH lacks newtype support");
-    return;
-  }
   let mut c = LspClient::start();
   let proj = TempProject::with_fixtures(&["newtype.capnp"]);
 
@@ -1100,7 +1071,11 @@ fn completion_field_ordinal_after_range() {
   let items = r["result"].as_array().expect("items");
   let labels: Vec<&str> =
     items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-  assert_eq!(labels, vec!["4", "[]"], "range ordinals mis-counted: {labels:?}");
+  assert_eq!(
+    labels,
+    vec!["4", "[]"],
+    "range ordinals mis-counted: {labels:?}"
+  );
   c.shutdown();
 }
 
@@ -1131,12 +1106,6 @@ fn completion_ordinal_inside_range() {
 fn completion_type_fills_empty_ordinal_range() {
   // Idea 2: completing a group newtype into an empty `@[]` attaches an additionalTextEdit
   // that fills the brackets with a correctly-sized ordinal range.
-  if !capnp_supports_newtypes() {
-    eprintln!(
-      "skipping completion_type_fills_empty_ordinal_range: no newtype support"
-    );
-    return;
-  }
   let mut c = LspClient::start();
   let proj = TempProject::with_fixtures(&["newtype.capnp"]);
   let path = proj.path("range_fill.capnp");
@@ -1240,10 +1209,6 @@ fn completion_type_fills_range_for_union_newtype() {
   // A *union* newtype's template flattens its members to direct explicit-ordinal fields,
   // so its ordinal span (and thus the `@[…]` size) is max-ordinal + 1 — here 2, for a
   // two-arm union. Confirms group and union newtypes are both sized correctly.
-  if !capnp_supports_newtypes() {
-    eprintln!("skipping completion_type_fills_range_for_union_newtype: no newtype support");
-    return;
-  }
   let mut c = LspClient::start();
   let proj = TempProject::with_fixtures(&["newtype.capnp"]);
   let path = proj.path("union_fill.capnp");
@@ -1278,12 +1243,6 @@ fn completion_type_fills_range_for_union_newtype() {
 
 #[test]
 fn goto_definition_on_newtype() {
-  if !capnp_supports_newtypes() {
-    eprintln!(
-      "skipping goto_definition_on_newtype: `capnp` lacks newtype support"
-    );
-    return;
-  }
   let mut c = LspClient::start();
   let proj = TempProject::with_fixtures(&["newtype.capnp"]);
   let uri = proj.uri("newtype.capnp");
@@ -1309,15 +1268,113 @@ fn goto_definition_on_newtype() {
   c.shutdown();
 }
 
+fn newtype_refs_project() -> TempProject {
+  TempProject::with_fixtures(&[
+    "newtype_refs_lib.capnp",
+    "newtype_refs_use.capnp",
+  ])
+}
+
+/// `(file, line, start, end)` of `needle` on the first line containing `line_match`
+/// in fixture `file`, in the shape `references_at` returns.
+fn ref_at(
+  proj: &TempProject,
+  file: &str,
+  line_match: &str,
+  needle: &str,
+) -> (String, u64, u64, u64) {
+  let (l, s, e) = span(&proj.text(file), line_match, needle);
+  (file.to_string(), l, s, e)
+}
+
+#[test]
+fn references_to_a_primitive_newtype() {
+  let mut c = LspClient::start();
+  let proj = newtype_refs_project();
+  let uri = proj.uri("newtype_refs_lib.capnp");
+  let lib = proj.text("newtype_refs_lib.capnp");
+  c.open(&uri, &lib);
+
+  let refs = references_at(
+    &mut c,
+    &uri,
+    locate_inside(&lib, "type AccountId", "AccountId"),
+    true,
+  );
+  let lib_f = "newtype_refs_lib.capnp";
+  let use_f = "newtype_refs_use.capnp";
+  let mut expected = vec![
+    ref_at(&proj, lib_f, "type AccountId", "AccountId"),
+    // Inside a union newtype's body, and as another newtype's target.
+    ref_at(&proj, lib_f, "account @0", "AccountId"),
+    ref_at(&proj, lib_f, "type Owner", "AccountId"),
+    ref_at(&proj, lib_f, "id @0", "AccountId"),
+    ref_at(&proj, use_f, "from @0", "AccountId"),
+    ref_at(&proj, use_f, "cc @5", "AccountId"),
+  ];
+  expected.sort();
+  assert_eq!(refs, expected);
+  c.shutdown();
+}
+
+#[test]
+fn references_to_a_group_newtype_from_a_ranged_use_site() {
+  let mut c = LspClient::start();
+  let proj = newtype_refs_project();
+  let uri = proj.uri("newtype_refs_use.capnp");
+  let user = proj.text("newtype_refs_use.capnp");
+  c.open(&uri, &user);
+
+  let refs = references_at(
+    &mut c,
+    &uri,
+    locate_inside(&user, "amount @[1,2]", "Money"),
+    false,
+  );
+  let mut expected = vec![
+    ref_at(&proj, "newtype_refs_lib.capnp", "balance @[1,2]", "Money"),
+    ref_at(&proj, "newtype_refs_use.capnp", "amount @[1,2]", "Money"),
+  ];
+  expected.sort();
+  assert_eq!(refs, expected);
+  c.shutdown();
+}
+
+#[test]
+fn references_to_a_union_newtype_and_a_newtype_of_a_newtype() {
+  let mut c = LspClient::start();
+  let proj = newtype_refs_project();
+  let uri = proj.uri("newtype_refs_lib.capnp");
+  let lib = proj.text("newtype_refs_lib.capnp");
+  c.open(&uri, &lib);
+
+  let payee = references_at(
+    &mut c,
+    &uri,
+    locate_inside(&lib, "type Payee", "Payee"),
+    true,
+  );
+  let mut expected = vec![
+    ref_at(&proj, "newtype_refs_lib.capnp", "type Payee", "Payee"),
+    ref_at(&proj, "newtype_refs_use.capnp", "to @[3,4]", "Payee"),
+  ];
+  expected.sort();
+  assert_eq!(payee, expected);
+
+  // `Owner` aliases `AccountId`, but is its own node: its references are only its own.
+  let owner =
+    references_at(&mut c, &uri, locate_inside(&lib, "owner @3", "Owner"), true);
+  let mut expected = vec![
+    ref_at(&proj, "newtype_refs_lib.capnp", "type Owner", "Owner"),
+    ref_at(&proj, "newtype_refs_lib.capnp", "owner @3", "Owner"),
+  ];
+  expected.sort();
+  assert_eq!(owner, expected);
+  c.shutdown();
+}
+
 #[test]
 fn completion_after_colon_offers_newtypes() {
-  if !capnp_supports_newtypes() {
-    eprintln!(
-      "skipping completion_after_colon_offers_newtypes: \
-       `capnp` on PATH lacks newtype support"
-    );
-    return;
-  }
   let mut c = LspClient::start();
   let proj = TempProject::with_fixtures(&["newtype.capnp"]);
   let uri = proj.uri("newtype.capnp");
