@@ -25,6 +25,12 @@ export function activate(_context: vscode.ExtensionContext) {
       maxWidth: config.get<number>("format.maxWidth"),
       warnLongLines: config.get<boolean>("format.warnLongLines"),
     },
+    workspace: {
+      include: config.get<string[]>("workspace.include"),
+      exclude: config.get<string[]>("workspace.exclude"),
+      useGitIgnore: config.get<boolean>("workspace.useGitIgnore"),
+      maxFiles: config.get<number>("workspace.maxFiles"),
+    },
   };
 
   const clientOptions: LanguageClientOptions = {

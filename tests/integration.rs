@@ -253,6 +253,191 @@ fn goto_definition_falls_back_for_generic_parameters() {
   c.shutdown();
 }
 
+fn refs_project() -> TempProject {
+  TempProject::with_fixtures(&["refs_lib.capnp", "refs_use.capnp"])
+}
+
+/// Request references at `(line, col)` and return them as sorted
+/// `(file name, line, start col, end col)` tuples.
+fn references_at(
+  c: &mut LspClient,
+  uri: &str,
+  (line, col): (u32, u32),
+  include_declaration: bool,
+) -> Vec<(String, u64, u64, u64)> {
+  let r = c.request(
+    "textDocument/references",
+    json!({
+      "textDocument": { "uri": uri },
+      "position": pos(line, col),
+      "context": { "includeDeclaration": include_declaration },
+    }),
+  );
+  let arr = r["result"]
+    .as_array()
+    .unwrap_or_else(|| panic!("expected references array, got {r}"));
+  let mut out: Vec<(String, u64, u64, u64)> = arr
+    .iter()
+    .map(|l| {
+      let file = l["uri"].as_str().unwrap().rsplit('/').next().unwrap();
+      (
+        file.to_string(),
+        l["range"]["start"]["line"].as_u64().unwrap(),
+        l["range"]["start"]["character"].as_u64().unwrap(),
+        l["range"]["end"]["character"].as_u64().unwrap(),
+      )
+    })
+    .collect();
+  out.sort();
+  out
+}
+
+/// The `(line, start col, end col)` of `needle` on the first line containing
+/// `line_match`.
+fn span(text: &str, line_match: &str, needle: &str) -> (u64, u64, u64) {
+  let (line, end) = locate(text, line_match, needle);
+  let len = needle.len() as u32;
+  (line as u64, (end - len) as u64, end as u64)
+}
+
+#[test]
+fn references_from_declaration_cover_unopened_importers() {
+  let mut c = LspClient::start();
+  let proj = refs_project();
+  let uri = proj.uri("refs_lib.capnp");
+  let lib = proj.text("refs_lib.capnp");
+  let user = proj.text("refs_use.capnp");
+  c.open(&uri, &lib);
+
+  let refs = references_at(
+    &mut c,
+    &uri,
+    locate_inside(&lib, "struct Point", "Point"),
+    true,
+  );
+  let at = |f: &str, t: &str, line: &str, needle: &str| {
+    let (l, s, e) = span(t, line, needle);
+    (f.to_string(), l, s, e)
+  };
+  let mut expected = vec![
+    at("refs_lib.capnp", &lib, "struct Point", "Point"),
+    at("refs_lib.capnp", &lib, "origin @0", "Point"),
+    at("refs_lib.capnp", &lib, "vertices @1", "Point"),
+    // `Lib.Point` is narrowed to just `Point`.
+    at("refs_use.capnp", &user, "centre @0", "Point"),
+  ];
+  expected.sort();
+  assert_eq!(refs, expected);
+  c.shutdown();
+}
+
+#[test]
+fn references_from_a_use_site_exclude_the_declaration_when_asked() {
+  let mut c = LspClient::start();
+  let proj = refs_project();
+  let uri = proj.uri("refs_use.capnp");
+  let user = proj.text("refs_use.capnp");
+  let lib = proj.text("refs_lib.capnp");
+  c.open(&uri, &user);
+
+  // Cursor on `Style` in `Lib.Shape.Style` — a nested type reached through an import.
+  let (line, _) = locate(&user, "styles @2", "Style");
+  let col = user
+    .lines()
+    .nth(line as usize)
+    .unwrap()
+    .find("Style)")
+    .unwrap();
+  let refs = references_at(&mut c, &uri, (line, col as u32 + 1), false);
+  let (ul, us, ue) = span(&user, "styles @2", "Style)");
+  let (ll, ls, le) = span(&lib, "style @2", "Style");
+  let mut expected = vec![
+    ("refs_use.capnp".to_string(), ul, us, ue - 1),
+    ("refs_lib.capnp".to_string(), ll, ls, le),
+  ];
+  expected.sort();
+  assert_eq!(refs, expected);
+  c.shutdown();
+}
+
+#[test]
+fn references_reflect_unsaved_edits_in_open_buffers() {
+  let mut c = LspClient::start();
+  let proj = refs_project();
+  let lib_uri = proj.uri("refs_lib.capnp");
+  let use_uri = proj.uri("refs_use.capnp");
+  let lib = proj.text("refs_lib.capnp");
+  let user = proj.text("refs_use.capnp");
+  c.open(&lib_uri, &lib);
+  c.open(&use_uri, &user);
+
+  // Add a second use of `Point` to the importer without saving it.
+  let edited = user.replace("}\n", "  corner @3 :Lib.Point;\n}\n");
+  c.change(&use_uri, 2, &edited);
+
+  let refs = references_at(
+    &mut c,
+    &lib_uri,
+    locate_inside(&lib, "struct Point", "Point"),
+    false,
+  );
+  let in_use: Vec<_> =
+    refs.iter().filter(|r| r.0 == "refs_use.capnp").collect();
+  assert_eq!(in_use.len(), 2, "expected both importer uses, got {refs:?}");
+  c.shutdown();
+}
+
+#[test]
+fn references_honour_workspace_include_patterns() {
+  // Two copies of the importer: one under a directory the include pattern selects,
+  // one outside it. Only the selected one should be searched.
+  let proj = refs_project();
+  let user = proj.text("refs_use.capnp");
+  let lib = proj.text("refs_lib.capnp");
+  for dir in ["svc/api/schema", "svc/api/docs"] {
+    let d = proj.path(dir);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+      d.join("refs_use.capnp"),
+      user.replace("\"refs_lib.capnp\"", "\"/refs_lib.capnp\""),
+    )
+    .unwrap();
+  }
+  // The root copy of the importer isn't selected either.
+  let root = proj.uri("");
+  let mut c = LspClient::start_with(
+    json!({
+      "importPaths": [proj.path("")],
+      "workspace": { "include": ["svc/*/schema/**", "refs_lib.capnp"] },
+    }),
+    Some(root.trim_end_matches('/')),
+  );
+  let uri = proj.uri("refs_lib.capnp");
+  c.open(&uri, &lib);
+  let (line, col) = locate_inside(&lib, "struct Point", "Point");
+  let r = c.request(
+    "textDocument/references",
+    json!({
+      "textDocument": { "uri": uri },
+      "position": pos(line, col),
+      "context": { "includeDeclaration": false },
+    }),
+  );
+  let files: Vec<String> = r["result"]
+    .as_array()
+    .unwrap_or_else(|| panic!("expected references, got {r}"))
+    .iter()
+    .map(|l| l["uri"].as_str().unwrap().to_string())
+    .filter(|u| !u.ends_with("/refs_lib.capnp"))
+    .collect();
+  assert_eq!(files.len(), 1, "got {files:?}");
+  assert!(
+    files[0].ends_with("/svc/api/schema/refs_use.capnp"),
+    "got {files:?}"
+  );
+  c.shutdown();
+}
+
 #[test]
 fn hover_returns_doc_comment() {
   let mut c = LspClient::start();
