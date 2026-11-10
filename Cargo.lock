@@ -84,6 +84,7 @@ dependencies = [
  "capnp-newtype",
  "cc",
  "dashmap",
+ "globset",
  "ignore",
  "regex",
  "ropey",

@@ -21,6 +21,12 @@ pub struct LspClient {
 impl LspClient {
   /// Spawn the server binary and complete the LSP `initialize` handshake.
   pub fn start() -> Self {
+    Self::start_with(Value::Null, None)
+  }
+
+  /// Like [`start`](Self::start), but with `initializationOptions` and a workspace
+  /// root URI.
+  pub fn start_with(options: Value, root_uri: Option<&str>) -> Self {
     let bin = env!("CARGO_BIN_EXE_capnprotols");
     let mut child = Command::new(bin)
       .stdin(Stdio::piped())
@@ -54,7 +60,8 @@ impl LspClient {
       json!({
           "capabilities": {},
           "processId": std::process::id(),
-          "rootUri": null,
+          "rootUri": root_uri,
+          "initializationOptions": options,
       }),
     );
     assert!(init.get("result").is_some(), "initialize failed: {init}");

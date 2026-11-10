@@ -6,8 +6,10 @@ mod diagnostics;
 mod document;
 mod index;
 mod ordinals;
+mod references;
 mod semantic_tokens;
 mod server;
+mod workspace;
 pub use capnp::schema_capnp;
 // Re-export from lib crate so binary-local modules can use `crate::config` / `crate::format`.
 pub use capnprotols::{config, format, grammar, ignore_file};

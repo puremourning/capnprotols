@@ -21,7 +21,6 @@ pub enum NodeKind {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // id/scope_id will be needed for cross-file resolution
 pub struct NodeInfo {
   pub id:                    u64,
   pub display_name:          String,
@@ -375,6 +374,15 @@ impl Index {
       .find(|i| i.start_byte == start && i.end_byte == end)
   }
 
+  /// Every FSI identifier recorded for `file`, sorted by `start_byte`. Empty when
+  /// `file` wasn't one of the compile's requested files.
+  pub fn identifiers_in(&self, file: &Path) -> &[IdentRef] {
+    self
+      .lookup_file(file)
+      .map(|fi| fi.identifiers.as_slice())
+      .unwrap_or(&[])
+  }
+
   pub fn node(&self, id: u64) -> Option<&NodeInfo> {
     self.nodes.get(&id)
   }
@@ -641,7 +649,7 @@ fn type_target_id(ty: &schema_capnp::type_::Reader) -> Option<u64> {
 /// nodes can be just a basename (no path prefix) while we hold the absolute overlay
 /// path, so we accept a basename match as well — the overlay basename is unique enough
 /// (`.capnprotols.<file>`) that this doesn't conflate unrelated files.
-fn paths_match(a: &Path, b: &Path) -> bool {
+pub fn paths_match(a: &Path, b: &Path) -> bool {
   if a == b {
     return true;
   }

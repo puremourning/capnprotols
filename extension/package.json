@@ -63,6 +63,28 @@
           "default": true,
           "description": "Publish a WARNING diagnostic when a line exceeds maxWidth and the formatter can't auto-wrap it."
         },
+        "capnprotols.workspace.include": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Globs selecting the schemas to search for references, relative to each workspace folder unless absolute (e.g. `foo/*/schema/**`). A pattern matching a directory includes everything under it. Empty means the whole workspace."
+        },
+        "capnprotols.workspace.exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Globs to skip during the workspace scan. Added to the built-in excludes (`**/node_modules`, `**/.*`)."
+        },
+        "capnprotols.workspace.useGitIgnore": {
+          "type": "boolean",
+          "default": true,
+          "description": "Honour .gitignore, .ignore and git's global/info excludes during the workspace scan."
+        },
+        "capnprotols.workspace.maxFiles": {
+          "type": "integer",
+          "default": 5000,
+          "description": "Stop the workspace scan after this many schemas."
+        },
         "capnprotols.trace.server": {
           "type": "string",
           "enum": ["off", "messages", "verbose"],
