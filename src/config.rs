@@ -204,6 +204,17 @@ fn which(name: &str) -> Option<PathBuf> {
 mod tests {
   use super::*;
 
+  /// Held by every test that writes a fake compiler or spawns one. On Linux, exec'ing a
+  /// script fails with ETXTBSY ("Text file busy") if any process still has it open for
+  /// writing — and a child forked by a concurrent test inherits our write fd until its own
+  /// exec closes it. Serialising write-then-exec against other spawns avoids that.
+  static PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+  fn process_lock() -> std::sync::MutexGuard<'static, ()> {
+    // A panicking test poisons the lock; the next test shouldn't fail because of it.
+    PROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+  }
+
   #[test]
   fn parses_import_paths() {
     assert_eq!(
@@ -240,6 +251,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn uses_compiler_reported_import_paths() {
+    let _lock = process_lock();
     let dir = scratch_dir("reported");
     // Neither directory contains capnp/c++.capnp: compiler-reported paths are kept anyway.
     let a = dir.join("a");
@@ -266,6 +278,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn falls_back_when_compiler_lacks_config() {
+    let _lock = process_lock();
     // Lay out an install prefix, reached through a symlink, without `capnp config`.
     let dir = scratch_dir("fallback");
     let prefix = dir.join("prefix");
@@ -286,8 +299,10 @@ mod tests {
     assert_eq!(cfg.resolution_roots.first(), Some(&prefix.join("include")));
     let _ = std::fs::remove_dir_all(&dir);
   }
+
   #[test]
   fn probe_finds_at_least_one_capnp_include() {
+    let _lock = process_lock();
     let cfg = Config::from_init(None);
     eprintln!(
       "compiler={} roots={:?}",
